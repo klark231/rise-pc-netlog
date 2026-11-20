@@ -20,6 +20,8 @@ Remove `dinput8.dll` when you're done; the log grows fast while you're online.
 ## What's in the log
 
 - `Steam client library: …` and `interface …` lines: which Steam library and networking interfaces the game uses.
+- Lobby lines (`CreateLobby`, `RequestLobbyList`, `lobby filter`, `JoinLobby`, `SetLobbyData`, `GetLobbyData`, …):
+  how players find and join each other. A value the game reads is logged when it changes.
 - A line per packet: time, `>` sent or `<` received, the Steam function, the other player (Steam ID, or the
   connection), the channel and size, then the bytes in hex with ASCII beside them.
 
@@ -28,7 +30,7 @@ Remove `dinput8.dll` when you're done; the log grows fast while you're online.
 The game loads `dinput8.dll` at start; this one loads the real one from System32 and passes its functions through. It
 hooks `LoadLibraryExW` to catch the Steam client library as it loads, hooks its `CreateInterface`, and wraps the send and
 receive functions of the networking interfaces the game asks for (`ISteamNetworking`, `ISteamNetworkingMessages`,
-`ISteamNetworkingSockets`), logging the data and calling the originals.
+`ISteamNetworkingSockets`) and the lobby functions of `ISteamMatchmaking`, logging the data and calling the originals.
 
 ## Building
 

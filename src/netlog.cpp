@@ -9,11 +9,13 @@
 // library in its place). LoadLibraryExW is hooked to catch that library the moment it's loaded, and its
 // CreateInterface is hooked to wrap the ISteamClient the game gets. ISteamClient hands out the networking interfaces
 // (GetISteamNetworking, GetISteamGenericInterface), and their send and receive functions get a wrapper that logs the
-// data and calls the original. Nothing is changed: no app IDs, ownership or tickets, only networking, read-only.
+// data and calls the original. ISteamMatchmaking's lobby calls are logged as well (creating, searching, joining, the
+// lobby's data and chat), since that's how players find each other online. Nothing is changed: no app IDs, ownership
+// or tickets, only networking and lobbies, read-only.
 // Which interfaces the game asks for is logged too, so we learn which of Steam's networking APIs Rise uses.
 //
 // Hooks with MinHook (Tsuda Kageyu, BSD 2-clause). The interface layouts are those of Valve's public Steamworks SDK
-// headers (ISteamClient 017+, ISteamNetworking 006, ISteamNetworkingMessages 002, ISteamNetworkingSockets 012).
+// headers (ISteamClient 017+, ISteamNetworking 006, ISteamNetworkingMessages 002, ISteamNetworkingSockets 012, ISteamMatchmaking 009).
 
 #include <windows.h>
 #include <objbase.h>
@@ -27,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <map>
 #include <set>
 #include <string>
 
@@ -194,6 +197,143 @@ void wrap_sockets(void* s) {
         g_receive_conn = reinterpret_cast<ReceiveOnConnection>(was);
 }
 
+// ---- ISteamMatchmaking 009: lobbies (how players find and join each other) ----------------------------------------------
+// Slots: RequestLobbyList 4, string filter 5, numerical filter 6, CreateLobby 13, JoinLobby 14, LeaveLobby 15,
+// GetLobbyData 19, SetLobbyData 20, GetLobbyMemberData 24, SetLobbyMemberData 25, SendLobbyChatMsg 26,
+// GetLobbyChatEntry 27. A CSteamID goes by value as its 64 bits. Reads are logged when the value differs from the last
+// one read for that lobby (and member) and key, since the game polls them.
+
+using RequestLobbyList = uint64_t(__fastcall*)(void*);
+using StringFilter = void(__fastcall*)(void*, const char*, const char*, int);
+using NumericalFilter = void(__fastcall*)(void*, const char*, int, int);
+using CreateLobby = uint64_t(__fastcall*)(void*, int, int);
+using JoinLobby = uint64_t(__fastcall*)(void*, uint64_t);
+using LeaveLobby = void(__fastcall*)(void*, uint64_t);
+using GetLobbyData = const char*(__fastcall*)(void*, uint64_t, const char*);
+using SetLobbyData = bool(__fastcall*)(void*, uint64_t, const char*, const char*);
+using GetMemberData = const char*(__fastcall*)(void*, uint64_t, uint64_t, const char*);
+using SetMemberData = void(__fastcall*)(void*, uint64_t, const char*, const char*);
+using SendChat = bool(__fastcall*)(void*, uint64_t, const void*, int);
+using GetChatEntry = int(__fastcall*)(void*, uint64_t, int, uint64_t*, void*, int, int*);
+RequestLobbyList g_request_list = nullptr;
+StringFilter g_string_filter = nullptr;
+NumericalFilter g_numerical_filter = nullptr;
+CreateLobby g_create_lobby = nullptr;
+JoinLobby g_join_lobby = nullptr;
+LeaveLobby g_leave_lobby = nullptr;
+GetLobbyData g_get_lobby_data = nullptr;
+SetLobbyData g_set_lobby_data = nullptr;
+GetMemberData g_get_member_data = nullptr;
+SetMemberData g_set_member_data = nullptr;
+SendChat g_send_chat = nullptr;
+GetChatEntry g_get_chat_entry = nullptr;
+
+std::mutex g_reads_m;
+std::map<std::string, std::string> g_reads;  // "lobby member key" -> the value last logged
+
+void log_read(const char* what, uint64_t lobby, uint64_t member, const char* key, const char* value) {
+    char k[256];
+    snprintf(k, sizeof k, "%llu %llu %s", static_cast<unsigned long long>(lobby), static_cast<unsigned long long>(member),
+             key ? key : "");
+    const std::string v = value ? value : "(null)";
+    {
+        std::lock_guard lock(g_reads_m);
+        auto it = g_reads.find(k);
+        if (it != g_reads.end() && it->second == v) return;
+        g_reads[k] = v;
+    }
+    if (member) log_line("%s lobby %llu member %llu \"%s\" = \"%s\"\n", what, static_cast<unsigned long long>(lobby),
+                         static_cast<unsigned long long>(member), key ? key : "", v.c_str());
+    else log_line("%s lobby %llu \"%s\" = \"%s\"\n", what, static_cast<unsigned long long>(lobby), key ? key : "", v.c_str());
+}
+
+uint64_t __fastcall request_list(void* self) {
+    log_line("RequestLobbyList\n");
+    return g_request_list(self);
+}
+
+void __fastcall string_filter(void* self, const char* key, const char* value, int cmp) {
+    log_line("lobby filter \"%s\" %d \"%s\"\n", key ? key : "", cmp, value ? value : "");
+    g_string_filter(self, key, value, cmp);
+}
+
+void __fastcall numerical_filter(void* self, const char* key, int value, int cmp) {
+    log_line("lobby filter \"%s\" %d %d\n", key ? key : "", cmp, value);
+    g_numerical_filter(self, key, value, cmp);
+}
+
+uint64_t __fastcall create_lobby(void* self, int type, int max) {
+    log_line("CreateLobby type %d, up to %d\n", type, max);
+    return g_create_lobby(self, type, max);
+}
+
+uint64_t __fastcall join_lobby(void* self, uint64_t lobby) {
+    log_line("JoinLobby %llu\n", static_cast<unsigned long long>(lobby));
+    return g_join_lobby(self, lobby);
+}
+
+void __fastcall leave_lobby(void* self, uint64_t lobby) {
+    log_line("LeaveLobby %llu\n", static_cast<unsigned long long>(lobby));
+    g_leave_lobby(self, lobby);
+}
+
+const char* __fastcall get_lobby_data(void* self, uint64_t lobby, const char* key) {
+    const char* v = g_get_lobby_data(self, lobby, key);
+    log_read("GetLobbyData", lobby, 0, key, v);
+    return v;
+}
+
+bool __fastcall set_lobby_data(void* self, uint64_t lobby, const char* key, const char* value) {
+    log_line("SetLobbyData lobby %llu \"%s\" = \"%s\"\n", static_cast<unsigned long long>(lobby), key ? key : "",
+             value ? value : "");
+    return g_set_lobby_data(self, lobby, key, value);
+}
+
+const char* __fastcall get_member_data(void* self, uint64_t lobby, uint64_t member, const char* key) {
+    const char* v = g_get_member_data(self, lobby, member, key);
+    log_read("GetLobbyMemberData", lobby, member, key, v);
+    return v;
+}
+
+void __fastcall set_member_data(void* self, uint64_t lobby, const char* key, const char* value) {
+    log_line("SetLobbyMemberData lobby %llu \"%s\" = \"%s\"\n", static_cast<unsigned long long>(lobby), key ? key : "",
+             value ? value : "");
+    g_set_member_data(self, lobby, key, value);
+}
+
+bool __fastcall send_chat(void* self, uint64_t lobby, const void* data, int size) {
+    log_packet('>', "SendLobbyChatMsg", lobby, -1, data, size > 0 ? static_cast<size_t>(size) : 0);
+    return g_send_chat(self, lobby, data, size);
+}
+
+int __fastcall get_chat_entry(void* self, uint64_t lobby, int id, uint64_t* user, void* data, int cap, int* type) {
+    const int n = g_get_chat_entry(self, lobby, id, user, data, cap, type);
+    if (n > 0) log_packet('<', "GetLobbyChatEntry", user ? *user : 0, type ? *type : -1, data, static_cast<size_t>(n));
+    return n;
+}
+
+// Puts hook in slot i and keeps what was there in original
+template <typename F>
+void wrap_slot(void* obj, int i, F hook, F& original) {
+    if (void* was = swap_slot(obj, i, reinterpret_cast<void*>(hook))) original = reinterpret_cast<F>(was);
+}
+
+void wrap_matchmaking(void* m) {
+    if (!m) return;
+    wrap_slot(m, 4, &request_list, g_request_list);
+    wrap_slot(m, 5, &string_filter, g_string_filter);
+    wrap_slot(m, 6, &numerical_filter, g_numerical_filter);
+    wrap_slot(m, 13, &create_lobby, g_create_lobby);
+    wrap_slot(m, 14, &join_lobby, g_join_lobby);
+    wrap_slot(m, 15, &leave_lobby, g_leave_lobby);
+    wrap_slot(m, 19, &get_lobby_data, g_get_lobby_data);
+    wrap_slot(m, 20, &set_lobby_data, g_set_lobby_data);
+    wrap_slot(m, 24, &get_member_data, g_get_member_data);
+    wrap_slot(m, 25, &set_member_data, g_set_member_data);
+    wrap_slot(m, 26, &send_chat, g_send_chat);
+    wrap_slot(m, 27, &get_chat_entry, g_get_chat_entry);
+}
+
 // ---- ISteamClient: GetISteamGenericInterface 12, GetISteamNetworking 16 -------------------------------------------------
 
 using GetGeneric = void*(__fastcall*)(void*, int, int, const char*);
@@ -211,7 +351,8 @@ void note_interface(const char* how, const char* version) {
 
 void wrap_by_name(const char* version, void* itf) {
     if (!version || !itf) return;
-    if (!strncmp(version, "SteamNetworkingMessages", 23)) wrap_messages(itf);
+    if (!strncmp(version, "SteamMatchMaking0", 17)) wrap_matchmaking(itf);
+    else if (!strncmp(version, "SteamNetworkingMessages", 23)) wrap_messages(itf);
     else if (!strncmp(version, "SteamNetworkingSockets", 22)) wrap_sockets(itf);
     else if (!strncmp(version, "SteamNetworking", 15)) wrap_networking(itf);
 }
