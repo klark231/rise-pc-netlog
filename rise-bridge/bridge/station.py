@@ -79,7 +79,12 @@ class Station:
             trailer = b"".join(self._trailer_entry(k) for a, k in self.peer_keys.items() if a != self.link.address)
             counter = 0
         else:
-            rkey = self.peer_keys.get(dst, bytes(4))
+            # CERTAIN (3 real captures, ~20000 packets): the receiver key is ZERO for the join-time messages
+            # (0x24 reply, 0x14 request "01"/"02", 0x18, 0x58) and the peer's key for the rest (0x14 ack "05",
+            # 0x1c, 0x68, 0x08). A request with the host's key in it is what the host ignored.
+            zero = all(m.ptype in (T_MESH, T_SESSION, T_KEEPALIVE) or
+                       (m.ptype == T_CONNECT and m.payload[:1] in (b"\x01", b"\x02")) for m in messages)
+            rkey = bytes(4) if zero else self.peer_keys.get(dst, bytes(4))
             trailer = b""
             counter = self.counters[dst] = (self.counters.get(dst, 0) + 1) & 0xFFFF
         self.nonce += 1
