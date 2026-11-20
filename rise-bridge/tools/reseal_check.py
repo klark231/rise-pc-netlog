@@ -15,6 +15,23 @@ import rise_net
 from bridge import pia
 
 
+def masks(body):
+    """The field mask byte of each message, walking the list as the reader does."""
+    out, i, size = [], 0, 0
+    while i < len(body):
+        m = body[i]
+        if m == 0xFF:
+            break
+        out.append("%02x" % m)
+        i += 1
+        if m & 1: i += 1
+        if m & 2: size = int.from_bytes(body[i:i + 2], "big"); i += 2
+        if m & 4: i += 4
+        if m & 8: i += 8
+        i = (i + size + 3) & ~3
+    return " ".join(out[:8])
+
+
 def main(path):
     key, macs, session, packets = rise_net.read_switch(path)
     if not key or session is None:
@@ -35,17 +52,22 @@ def main(path):
         n["opened"] += 1
         msgs = pia.parse_body(body)
         rebuilt = pia.build_body(msgs)
-        same_body = body[:len(rebuilt)] == rebuilt and set(body[len(rebuilt):]) <= {0xFF}  # the rest of the packet is 0xff padding
+        core = rebuilt[:-1]  # without my 0xff terminator: a body may end right after its last message
+        same_body = body[:len(core)] == core and set(body[len(core):]) <= {0xFF}
         n["body_same"] += same_body
         tail = d[0x0F]
         h = pia.Header(d[5:9], d[9:13], int.from_bytes(d[13:15], "big"), d[len(d) - tail:] if tail else b"", d[0x10:0x18])
         again = crypto.seal(body, mac, h)
         n["packet_same"] += again == d
-        if not same_body and shown < 3:
+        if not same_body and shown < 4:
             shown += 1
-            print("message list differs at %s %s -> %s" % (pk["t"], pk["src"], pk["dst"]))
-            print("  original", body[:48].hex())
-            print("  rebuilt ", rebuilt[:48].hex())
+            print("differs at %s %s -> %s: %d messages, body %d bytes, mine %d" % (
+                pk["t"], pk["src"], pk["dst"], len(msgs), len(body), len(core)))
+            print("  masks  original", masks(body), " mine", masks(core + b"\xff"))
+            i = next((k for k in range(min(len(body), len(core))) if body[k] != core[k]), min(len(body), len(core)))
+            print("  first difference at byte", i)
+            print("  original", body[max(0, i - 8):i + 24].hex())
+            print("  mine    ", core[max(0, i - 8):i + 24].hex())
     print(n)
 
 
