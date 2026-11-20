@@ -24,7 +24,7 @@ def station(ip: str, port: int, sid: bytes, key: bytes, rand: bytes) -> bytes:
 
 
 def connect_request(target_sid: bytes, target_key: bytes, me: bytes, session_id: bytes, name: str, seq: int) -> bytes:
-    """0x14, first byte 01: 0x134 bytes. Offsets from NOTES; the name block (0x6e..0x12f) is a GUESS."""
+    """0x14, first byte 01: 0x134 bytes. Offsets from NOTES; the name block matches a capture byte for byte (only seen with the name "Hunter")."""
     b = bytearray(0x134)
     b[0:3] = bytes.fromhex("010004")
     b[3:11] = target_sid
@@ -35,11 +35,11 @@ def connect_request(target_sid: bytes, target_key: bytes, me: bytes, session_id:
     b[0x22:0x22 + 0x44] = me
     b[0x66:0x6A] = session_id[::-1]            # GUESS: "session ID little endian", so the 4 advertise bytes reversed
     b[0x6A:0x6E] = bytes.fromhex("01010101")
-    n = name.encode("utf-8")[:0x20]
-    b[0x6E] = 1                                # GUESS: "Hunter, twice, each with a 01 before"
-    b[0x6F:0x6F + len(n)] = n
-    b[0x8F] = 1
-    b[0x90:0x90 + len(n)] = n
+    n = name.encode("utf-8")[:0x27]
+    b[0x6E:0x6E + len(n)] = n                  # CERTAIN (capture): the name, 0x50 bytes of room
+    b[0xBE] = 1                                # CERTAIN
+    b[0xBF:0xBF + len(n)] = n                  # CERTAIN: the name again, 0x28 bytes of room
+    b[0xE7] = 1                                # CERTAIN (seen once; meaning unknown)
     b[0x130:0x134] = struct.pack("<I", seq)    # GUESS: endianness
     return bytes(b)
 

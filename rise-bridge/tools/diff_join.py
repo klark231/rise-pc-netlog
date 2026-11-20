@@ -20,7 +20,7 @@ def main(path):
         p = bytes(m["payload"])
         if m["ptype"] == 0x14 and p[:3] == bytes.fromhex("010004") and len(p) == 0x134:
             me = p[0x22:0x66]
-            name = p[0x6F:0x8F].split(b"\0")[0].decode("utf-8", "replace")
+            name = p[0x6E:0x8E].split(b"\0")[0].decode("utf-8", "replace")
             built = joinmsgs.connect_request(p[3:11], p[11:15], me, p[0x66:0x6A][::-1], name,
                                              int.from_bytes(p[0x130:0x134], "little"))
             bad = [i for i in range(len(p)) if p[i] != built[i]]
