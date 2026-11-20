@@ -34,4 +34,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" rise-pc-netlog.zip --title "${{ github.ref_name }}" --notes "dinput8.dll: put it next to MonsterHunterRise.exe. See README."
+        run: |
+          gh release create "${{ github.ref_name }}" rise-pc-netlog.zip --title "${{ github.ref_name }}" --notes "dinput8.dll goes next to MonsterHunterRise.exe. See README."
