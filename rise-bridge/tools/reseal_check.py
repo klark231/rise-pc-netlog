@@ -52,20 +52,19 @@ def main(path):
         n["opened"] += 1
         msgs = pia.parse_body(body)
         rebuilt = pia.build_body(msgs)
-        core = rebuilt[:-1]  # without my 0xff terminator: a body may end right after its last message
-        same_body = body[:len(core)] == core and set(body[len(core):]) <= {0xFF}
+        same_body = body == rebuilt
         n["body_same"] += same_body
         if not same_body:
-            # same message list, same masks, same length: then only bytes between a payload and the next 4 boundary differ
-            padding_only = masks(body, 999) == masks(core + b"\xff", 999) and len(body) in range(len(core), len(core) + 2) \
+            # same masks, same payloads, same length: only the bytes between a payload and its next 4 boundary differ
+            padding_only = masks(body, 999) == masks(rebuilt, 999) and len(body) == len(rebuilt) \
                 and [m.payload for m in pia.parse_body(body)] == [m.payload for m in msgs]
             n["only_padding_differs"] += padding_only
             n["other_differences"] += not padding_only
-        tail = d[0x0F]
         h = pia.Header(d[5:9], d[9:13], int.from_bytes(d[13:15], "big"), d[len(d) - tail:] if tail else b"", d[0x10:0x18])
         again = crypto.seal(body, mac, h)
         n["packet_same"] += again == d
         if not same_body and not padding_only and shown < 4:
+            core = rebuilt
             shown += 1
             print("differs at %s %s -> %s: %d messages, body %d bytes, mine %d" % (
                 pk["t"], pk["src"], pk["dst"], len(msgs), len(body), len(core)))

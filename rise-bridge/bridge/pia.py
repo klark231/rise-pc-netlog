@@ -33,7 +33,7 @@ class Message:
 
 
 def build_body(messages: List[Message]) -> bytes:
-    """A message list: field mask, the fields that differ from the message before, payload padded to 4, 0xff at the end."""
+    """A message list: field mask, the fields that differ from the message before, payload padded to 4 (zeros; the real ones leave garbage there, nobody reads it), then 0xff up to a multiple of 16."""
     out = bytearray()
     prev = {"flags": 0, "size": 0, "ptype": 0, "port": 0, "dst": 0}
     for first, m in enumerate(messages):
@@ -66,7 +66,8 @@ def build_body(messages: List[Message]) -> bytes:
         while len(out) % 4:  # padding is to 4 from the start of the body, as rise_net.py reads it
             out.append(0)
         prev = cur
-    out.append(0xFF)
+    while len(out) % 16:  # CERTAIN (every body in a capture is a multiple of 16): 0xff fills the rest, no terminator when full
+        out.append(0xFF)
     return bytes(out)
 
 
