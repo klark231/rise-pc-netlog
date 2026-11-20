@@ -60,13 +60,25 @@ SteamConReq to each of the other members, the same with each of them (a full mes
 
 ## 3. Switch: Pia, as the port captures it
 
-- Packet: `32 ab 98 64`, version `0x89` (bit 7: encrypted). Header 0x20 bytes: `[0x09..0x0c]` the sender's key
-  (4 bytes, the same one the join messages carry; its last byte goes into the nonce), `[0x0f]` how many bytes at the
-  end aren't ciphertext, `[0x10..0x17]` the nonce's other 8 bytes, `[0x18..0x1f]` not decoded yet.
-- AES-128 in GCM's counter mode, counter from 2. Key: from Pia's key schedule each session (the capture logs it,
-  `# AES key … from main+0x24d9cb0`). Nonce: CRC32(session ID [4 bytes] + sender's MAC)'s first 3 bytes big endian,
-  header byte 0x0c, header bytes 0x10–0x17. Ciphertext from 0x20 up to those last `[0x0f]` bytes. (`rise_net.py` decrypts; the tag
-  isn't checked.)
+- Packet header, 0x20 bytes (checked against two captures):
+
+  | bytes | what |
+  |---|---|
+  | 0x00–0x03 | `32 ab 98 64` |
+  | 0x04 | `0x89`: version 9, bit 7 = encrypted |
+  | 0x05–0x08 | the receiver's key, or 0 when the packet goes to several (then the trailer lists them) |
+  | 0x09–0x0c | the sender's key (the 4 bytes after its station ID in the join messages) |
+  | 0x0d–0x0e | a 16-bit counter per receiver (0 on packets to several) |
+  | 0x0f | the trailer's length: 2 bytes per receiver, the low 16 bits of each one's key, after the ciphertext, not encrypted |
+  | 0x10–0x17 | 8 bytes of the nonce (they count up) |
+  | 0x18–0x1f | **the GCM tag**, 8 bytes |
+
+- **Plain AES-128-GCM**, 12-byte nonce, 8-byte tag, no additional data: every packet of the capture verifies with
+  Python's `cryptography` (`rise_net.py verify`). So a bridge makes valid packets with any AES-GCM library. Key: from
+  Pia's key schedule, new each session (the capture logs it, `# AES key … from main+0x24d9cb0`); on the hub's side
+  it's to be worked out how the key follows from the session (the port can tell us, it computes it). Nonce:
+  CRC32(session ID [4 bytes] + sender's MAC), first 3 bytes big endian; header byte 0x0c (the sender key's last byte);
+  header bytes 0x10–0x17. Ciphertext: from 0x20 to the trailer.
 - Decrypted: messages, each a field mask (1 flags, 2 size u16, 4 protocol type u8 + port u24, 8 destination u64; a
   field not in the mask is the previous message's), the payload, padded to 4. `0xff` ends the list.
 - Protocol types seen: `0x68` game, `0x58` keepalive / clock (13 bytes, constantly), `0x14` connection, `0x18` session,
@@ -93,6 +105,50 @@ Joining (port is station .3, host .1, one more player .2):
 The station ID is the MAC's bytes reordered: MAC `02:c9:9f:56:8d:1a` → `9f 8d 1a 56 c9 02 00 00` (bytes 2, 4, 5, 3,
 1, 0).
 
+### The join messages' fields
+
+From the two captures that start with a join (sessions `edee5e2c` and `ece6f000`). **Certain**: seen with the
+expected different values in both. **Guess**: the same in both, or seen once.
+
+A station (member) as these messages carry it, 0x44 bytes, used in `0x14`, `0x18`:
+
+| offset | size | what | |
+|---|---|---|---|
+| 0x00 | 4 | `02 06 00 00` | guess: address family / length |
+| 0x04 | 4 | IPv4 address, big endian (169.254.x.N) | certain |
+| 0x08 | 2 | UDP port, big endian (12345) | certain |
+| 0x0a | 6 | zeros | |
+| 0x10 | 8 | station ID, little endian: the u64 `MAC[0] MAC[1] MAC[3] MAC[5] MAC[4] MAC[2]` (`0x24` has it big endian) | certain |
+| 0x18 | 4 | the station's key (the packet header's sender / receiver key) | certain |
+| 0x1c | 4 | another random 32-bit value per station | certain (differs per station and session), meaning unknown |
+| 0x20 | 4 | `00 00 00 01` | guess |
+| 0x24 | 0x20 | zeros | |
+
+`0x14` (connection), first byte the kind:
+
+- `01 00 04` request, 308 bytes: target's station ID (8) + target's key (4); `08` and 8 (protocol type, version) pairs
+  `14 02 18 03 1c 00 24 00 58 03 68 01 94 01 a4 00`; `00 24` (guess); the sender as a station (above, at 0x22); at 0x66
+  the session ID little endian (4); `01 01 01 01`; the player's name, UTF-8, zero-padded (here `Hunter`, twice, each
+  with a `01` before); at the end (0x130) a 32-bit sequence number.
+- `02 00 04` the same from the other side (949 bytes: the same layout, longer, padded).
+- `05 00 00 00` + u32: acknowledges a sequence number.
+
+`0x18` (session):
+
+- `20 0N 00 00` + u32 (counts up with each version of the list) + `01 00 0M 00` (M: members listed) + the members as
+  stations, 556 bytes: the host's list of who's in.
+- `01 fd` + u32: the joiner's answer, the sequence number + 1.
+- `02 03 00 02 01 00 03 00 04 00 08 00 00 00 00 0N` + every member as a station, ending in `02 00 0N 00` + the
+  joiner's sequence number + 1, 224 bytes: guess, the confirmation that the joiner is in.
+
+`0x24` (mesh, from the host): `01 11 49`, zeros, at 0x0c a byte that differs per session (5, 3; the joiner's `01 21`
+echoes it), 12 random bytes per session, the host's station ID big endian, then per slot: slot index, address, port,
+and `ff` for empty slots. The joiners send `01 21` + zeros + that byte, 20 bytes, to everyone.
+
+`0x1c` (clock): the joiner sends 8 bytes of its time + 8 zero bytes; the host sends them back with its time in the last 8.
+
+`0x08`: a station leaving, empty.
+
 ## 4. What a bridge would be
 
 | Switch side (Pia) | PC side (Steam) |
@@ -108,7 +164,8 @@ each) and moves `0x68` payloads between the two. Open questions:
 
 1. The fields of `0x14` / `0x18` / `0x24` in full, enough to make a PC player a station the Switch side accepts (the
    key, the nonce byte, the station ID for a player with no MAC).
-2. Whether Pia's GCM tag is checked by the game (the bridge has to make a real one if so; GHASH with the same key).
+2. How the session key follows from the session (the port logs it, so a bridge inside the hosting port's runtime has
+   it anyway; a bridge elsewhere needs the derivation).
 3. The 486-byte PC messages against what the Switch sends on joining.
 4. What the `SearchKey`s are (quest, rank, region…), to fill them for a Switch room.
 5. What `SteamConReq` / `SteamConAns` lead to on the PC (whether anything else is checked: `IsEnableAuth` = true

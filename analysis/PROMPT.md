@@ -27,15 +27,18 @@ The goal is a bridge so a PC player can join a port player's hub (and the other 
 2. On the hub side, one Pia station per PC player: the join (types 0x24, 0x14, 0x18, 0x1c), keepalives (0x58),
    encrypting with the session key, and moving 0x68 payloads.
 
+Already worked out (in `NOTES.md`): Pia's packet header field by field, that it's plain AES-128-GCM with an 8-byte
+tag (every captured packet verifies), and a first field map of the join messages, each marked certain or guess.
+
 What I need from you now, in this order:
 
-1. From the captures, decode Pia's join messages (0x14, 0x18, 0x24, 0x1c) field by field, enough to build them for a
-   station that isn't a real Switch. Mark each field as certain (seen varying as expected across captures) or a guess.
-2. Work out whether Pia's GCM tag has to be valid (it may be header bytes 0x18–0x1f, or the `[0x0f]` bytes after the ciphertext) and how to
-   compute it if so.
-3. Line up the PC join's first 30 game messages with the Switch join's, and explain the 486-byte PC messages.
-4. Then propose the bridge's design concretely: which process does what, the messages each side sends when a PC player
-   joins, and what state it keeps. Don't write the code yet.
+1. Check the join messages' field map against the captures and fill in what's marked guess or unknown (the random
+   32-bit value per station, the byte at 0x0c of `0x24`, the 12 random bytes in `0x24`, the `02 03 …` `0x18` message).
+   Keep marking each field certain or guess.
+2. Line up the PC join's first 30 game messages with the Switch join's, and explain the 486-byte PC messages.
+3. Propose the bridge's design concretely: which process does what, the messages each side sends when a PC player
+   joins, and what state it keeps. One option to weigh: the Pia side living inside the hosting port's own runtime,
+   which already knows the session key. Don't write the code yet.
 
 Rules:
 

@@ -7,14 +7,16 @@
   python3 rise_net.py pc LOG [--all]             the PC session: lobbies, then each game message decoded
   python3 rise_net.py switch LOG [--all]         the Switch session: Pia decrypted, its messages one per line
   python3 rise_net.py compare SWITCH_LOG PC_LOG  the game's messages on both, what they share
+  python3 rise_net.py verify LOG                 checks every Pia packet's GCM tag
 
 Needs Python 3.8+ and `cryptography` (pip install cryptography) for the Switch side.
 
 What's known (see NOTES.md):
  - Pia (Switch): "32 ab 98 64", version 0x89 (encrypted). AES-128-GCM's counter mode: key from Pia's key schedule
    (logged in the capture), nonce = CRC32(session id[4] + sender's MAC)[first 3 bytes, big endian] + header[0x0c] +
-   header[0x10:0x18], counter from 2, ciphertext from 0x20 to the end minus header[0x0f] (the tag's length). The
-   decrypted body is a list of messages, each with a field mask; 0xff ends it.
+   header[0x10:0x18], tag = header[0x18:0x20] (8 bytes, no additional data), ciphertext from 0x20 to the trailer
+   (header[0x0f] bytes: the receivers' keys, 16 bits each). That's plain AES-128-GCM. The decrypted body is a list of
+   messages, each with a field mask; 0xff ends it.
  - Game messages: Pia protocol type 0x68 on the Switch; Steam's SendMessageToUser on PC, behind a 6-byte header
    (u16 + u32, both the length, big endian). Byte for byte the same on both.
  - A game message: 3 bytes that follow from its content, then the rest XORed with one byte (the first of it is 0).
@@ -142,7 +144,31 @@ class Pia:
     def __init__(self, key, macs, session):
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         self.ecb = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
-        self.macs, self.session = macs, session
+        self.key, self.macs, self.session = key, macs, session
+
+    def nonce(self, pk):
+        d = bytes(pk['data'])
+        mac = self.macs.get(pk['src'])
+        if mac is None:
+            return None
+        return struct.pack('>I', zlib.crc32(self.session + mac))[:3] + bytes([d[0x0c]]) + d[0x10:0x18]
+
+    def verify(self, pk):
+        """True / False for an encrypted packet's tag, None if it can't be checked"""
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        d = bytes(pk['data'])
+        if not d.startswith(PIA_MAGIC) or len(d) < 0x20 or not d[4] & 0x80:
+            return None
+        nonce = self.nonce(pk)
+        if nonce is None:
+            return None
+        try:
+            dec = Cipher(algorithms.AES(self.key), modes.GCM(nonce, d[0x18:0x20], min_tag_length=8)).decryptor()
+            dec.update(d[0x20:len(d) - d[0x0f]])
+            dec.finalize()
+            return True
+        except Exception:
+            return False
 
     def decrypt(self, pk):
         d = bytes(pk['data'])
@@ -150,10 +176,9 @@ class Pia:
             return None
         if not d[4] & 0x80:
             return d[0x10:]  # not encrypted
-        mac = self.macs.get(pk['src'])
-        if mac is None:
+        nonce = self.nonce(pk)
+        if nonce is None:
             return None
-        nonce = struct.pack('>I', zlib.crc32(self.session + mac))[:3] + bytes([d[0x0c]]) + d[0x10:0x18]
         body = d[0x20:len(d) - d[0x0f]]
         out = bytearray()
         for i in range(0, len(body), 16):
@@ -235,11 +260,22 @@ def cmd_compare(sw_path, pc_path):
     print('sizes only on Switch', [(k, v) for k, v in s.most_common(40) if k not in p][:12])
 
 
+def cmd_verify(path):
+    key, macs, session, packets = read_switch(path)
+    if not key or session is None:
+        sys.exit('no Pia key or advertise data in %s (an older capture?)' % path)
+    pia = Pia(key, macs, session)
+    c = collections.Counter(pia.verify(pk) for pk in packets)
+    print('tags right: %d, wrong: %d, not checked (not Pia, not encrypted, unknown sender): %d' % (c[True], c[False], c[None]))
+
+
 def main(a):
     if len(a) >= 2 and a[0] == 'pc':
         cmd_pc(a[1], '--all' in a)
     elif len(a) >= 2 and a[0] == 'switch':
         cmd_switch(a[1], '--all' in a)
+    elif len(a) >= 2 and a[0] == 'verify':
+        cmd_verify(a[1])
     elif len(a) >= 3 and a[0] == 'compare':
         cmd_compare(a[1], a[2])
     else:
