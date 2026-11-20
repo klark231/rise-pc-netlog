@@ -44,8 +44,15 @@ def connect_request(target_sid: bytes, target_key: bytes, me: bytes, session_id:
     return bytes(b)
 
 
-def connect_ack(seq: int) -> bytes:
-    return bytes.fromhex("05000000") + struct.pack("<I", seq)  # CERTAIN layout, byte order GUESS
+def connect_ack(seq) -> bytes:
+    """05 00 00 00 + 4 bytes. CERTAIN (second capture): the 4 bytes are the last 4 bytes of the host's 0x14 `02 00 04`
+    message (949 bytes), copied unchanged. An int is packed little endian (what diff_small.py reads back)."""
+    return bytes.fromhex("05000000") + (seq if isinstance(seq, bytes) else struct.pack("<I", seq))
+
+
+def session_ack_for(hosts_ack4: bytes) -> bytes:
+    """01 fd + the 4 bytes of the host's own `05 00 00 00 ....` ack, plus 1 as a big endian number (CERTAIN, both captures)."""
+    return bytes.fromhex("01fd") + ((int.from_bytes(hosts_ack4, "big") + 1) & 0xFFFFFFFF).to_bytes(4, "big")
 
 
 def session_ack(seq_plus_one: int) -> bytes:

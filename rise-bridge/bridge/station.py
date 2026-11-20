@@ -21,12 +21,10 @@ PORT = 12345  # CERTAIN: every station's address in the captures ends in :12345
 
 @dataclass
 class Conventions:
-    counter_order: str = "big"      # GUESS: the u16 counter's byte order (header_fields.py item 2)
-    nonce_order: str = "big"        # GUESS: the 8-byte nonce counter's byte order
-    trailer: str = "k24"            # GUESS: which 2 bytes of a receiver's key go in the trailer: k02 k24 k02r k24r (item 1)
-    game_port: int = 0              # GUESS: header_fields.py item 3
-    game_flags: int = 0
-    game_dst: int = 0
+    counter_order: str = "big"      # CERTAIN (second capture): the u16 counter counts up in its second byte
+    nonce_order: str = "big"        # CERTAIN: the 8-byte nonce counter counts up in its last byte
+    trailer: str = "k24"            # CERTAIN (3428 of 3428 in the second capture): key[2:4], as is
+    ticks_per_second: int = 19_200_000  # CERTAIN: the keepalives' time advances by this much a second (second capture)
 
 
 class Station:
@@ -37,9 +35,10 @@ class Station:
         self.crypto: Optional[PiaCrypto] = None
         self.peer_keys: Dict[int, bytes] = {}    # address -> the key in the packets it sends (CERTAIN: header 0x09..0x0c)
         self.counters: Dict[int, int] = {}
-        self.nonce = int.from_bytes(os.urandom(2), "big")
+        self.nonce = int.from_bytes(os.urandom(8), "big") & ((1 << 63) - 1)  # the real ones start at random 8-byte values
         self.state = "waiting"                    # waiting -> requested -> in
-        self.last_keepalive: Optional[bytes] = None
+        self.clock_offset: Optional[int] = None  # host ticks - ours, once the host has sent a keepalive
+        self.host_ack4: Optional[bytes] = None
         self.on_game: Callable[[int, bytes], None] = lambda addr, payload: None
         self.on_leave: Callable[[int], None] = lambda addr: None
         self.ack_seq = 0
@@ -91,16 +90,36 @@ class Station:
             pkt = pkt[:13] + struct.pack("<H", counter) + pkt[15:]  # NOTE: this breaks nothing: the counter isn't in the nonce
         self.link.send(PORT, dst, PORT, pkt)
 
+    def _node_of(self, addr: int) -> int:
+        for n in self.link.info.nodes():
+            if n["address"] == addr:
+                return n["node"]
+        return 0
+
+    def msg(self, ptype: int, payload: bytes, to: int = 0) -> Message:
+        """A message with the flags and destination its type uses (CERTAIN, second capture, every sender):
+        0x24 flags 0x11 dst 0; 0x14 and 0x18 to the host dst 0; 0x58 dst 0xffffffff; 0x1c, 0x68, 0x08 dst = 1 << node."""
+        flags = 0x11 if ptype == T_MESH else 1
+        if ptype == T_KEEPALIVE:
+            dst = 0xFFFFFFFF
+        elif ptype in (T_CLOCK, T_GAME, T_LEAVE):
+            dst = 1 << self._node_of(to)
+        else:
+            dst = 0
+        return Message(ptype, payload, port=0, flags=flags, dst=dst)
+
     def send_game(self, dst: int, payload: bytes) -> None:
-        c = self.conv
-        self.send(dst, [Message(T_GAME, payload, port=c.game_port, flags=c.game_flags, dst=c.game_dst)])
+        self.send(dst, [self.msg(T_GAME, payload, dst)])
+
+    def _ticks(self) -> int:
+        return int(time.monotonic() * self.conv.ticks_per_second) + (self.clock_offset or 0)
 
     def _keepalives(self) -> None:
         while self.link.sock is not None and self.link.sock.fileno() != -1:
             host, _ = self._host()
-            if self.state == "in" and host and self.last_keepalive:
-                # GUESS: the host takes a replay of what it last sent; the 13 bytes' meaning isn't worked out
-                self.send(host, [Message(T_KEEPALIVE, self.last_keepalive)])
+            if self.state == "in" and host and self.clock_offset is not None:
+                # u32 0, the time as 5 bytes of 19.2 MHz ticks, u32 0 (the plain keepalive in both captures)
+                self.send(host, [self.msg(T_KEEPALIVE, bytes(4) + (self._ticks() & (2 ** 40 - 1)).to_bytes(5, "big") + bytes(4))])
             time.sleep(0.5)
 
     # ---- receiving ----
@@ -119,26 +138,36 @@ class Station:
     def _message(self, src: int, m: Message) -> None:
         host, host_mac = self._host()
         p = m.payload
-        if m.ptype == T_MESH and p[:2] == bytes.fromhex("0111") and self.state == "waiting" and src == host:
+        if src != host:
+            if m.ptype == T_GAME:
+                self.on_game(src, p)
+            elif m.ptype == T_LEAVE:
+                self.on_leave(src)
+            return
+        if m.ptype == T_MESH and p[:2] == bytes.fromhex("0111") and self.state == "waiting":
             # the host's station list: answer it, then ask the host to connect us
-            self.send((self.link.address & 0xFFFFFF00) | 0xFF, [Message(T_MESH, joinmsgs.mesh_reply(p[0x0C]))])
+            self.send((self.link.address & 0xFFFFFF00) | 0xFF, [self.msg(T_MESH, joinmsgs.mesh_reply(p[0x0C]))])
             me = joinmsgs.station(".".join(str(self.link.address >> s & 255) for s in (24, 16, 8, 0)), PORT,
                                   station_id(self.link.mac), self.key, self.rand)
             req = joinmsgs.connect_request(station_id(host_mac), self.peer_keys[host], me,
                                            self.link.info.pia_session_id, self.link.name, int.from_bytes(os.urandom(4), "little"))
-            self.send(host, [Message(T_CONNECT, req)])
+            self.send(host, [self.msg(T_CONNECT, req)])
             self.state = "requested"
             self.log("sent the join request")
-        elif m.ptype == T_CONNECT and p[:3] == bytes.fromhex("020004") and len(p) >= 0x134 and src == host:
-            self.ack_seq = struct.unpack("<I", p[0x130:0x134])[0]  # GUESS: that this is the number the capture's ack echoes
-            self.send(host, [Message(T_CONNECT, joinmsgs.connect_ack(self.ack_seq))])
-            self.send(host, [Message(T_SESSION, joinmsgs.session_ack((self.ack_seq + 1) & 0xFFFFFFFF))])
-        elif m.ptype == T_SESSION and p[:2] == bytes.fromhex("0203") and self.state == "requested":
-            self.state = "in"
-            self.send(host, [Message(T_CLOCK, joinmsgs.clock_request(struct.pack("<Q", int(time.time() * 1000))))])
+        elif m.ptype == T_CONNECT and p[:3] == bytes.fromhex("020004") and len(p) >= 8:
+            self.send(host, [self.msg(T_CONNECT, joinmsgs.connect_ack(p[-4:]))])  # CERTAIN: its last 4 bytes, unchanged
+        elif m.ptype == T_CONNECT and p[:4] == bytes.fromhex("05000000") and len(p) == 8:
+            self.host_ack4 = p[4:8]
+            self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(p[4:8]))])
+        elif m.ptype == T_SESSION and p[:1] == b"\x02" and self.state == "requested":
+            self.state = "in"  # GUESS: that this (0x18 starting 02, 156 bytes) is "you're in"; the host repeats it
             self.log("in the session")
-        elif m.ptype == T_KEEPALIVE:
-            self.last_keepalive = p
+        elif m.ptype == T_KEEPALIVE and len(p) == 13:
+            host_ticks = int.from_bytes(p[4:9], "big")
+            self.clock_offset = (host_ticks - int(time.monotonic() * self.conv.ticks_per_second)) & (2 ** 40 - 1)
+            if self.state == "in" and not getattr(self, "_clock_sent", False):
+                self._clock_sent = True
+                self.send(host, [self.msg(T_CLOCK, self._ticks().to_bytes(8, "big") + bytes(8), host)])
         elif m.ptype == T_GAME:
             self.on_game(src, p)
         elif m.ptype == T_LEAVE:
