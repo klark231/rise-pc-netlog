@@ -25,6 +25,11 @@ Remove `dinput8.dll` when you're done; the log grows fast while you're online.
 - A line per packet: time, `>` sent or `<` received, the Steam function, the other player (Steam ID, or the
   connection), the channel and size, then the bytes in hex with ASCII beside them.
 
+## Analysis
+
+`analysis/` has what the captures show so far (`NOTES.md`), a script that reads and decrypts both kinds of capture
+(`rise_net.py`), and a prompt for carrying on with another assistant (`PROMPT.md`).
+
 ## How it works
 
 The game loads `dinput8.dll` at start; this one loads the real one from System32 and passes its functions through. It
