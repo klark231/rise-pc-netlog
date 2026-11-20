@@ -36,9 +36,12 @@ def main():
     st = Station(link)
     st.on_game = lambda addr, payload: print("game message from %08x: %d bytes" % (addr, len(payload)))
     st.start()
+    t0 = time.time()
     try:
         while True:
             time.sleep(1)
+            if st.state != "in" and int(time.time() - t0) in (10, 30):
+                print("still %s after %ds" % (st.state, time.time() - t0))
     except KeyboardInterrupt:
         link.leave()
 

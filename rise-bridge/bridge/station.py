@@ -117,6 +117,8 @@ class Station:
     def _keepalives(self) -> None:
         while self.link.sock is not None and self.link.sock.fileno() != -1:
             host, _ = self._host()
+            if self.state == "requested" and host and self.host_ack4 is None and getattr(self, "req_pkt", None):
+                self.send(host, [self.msg(T_CONNECT, self.req_pkt)])  # a real joiner resends about every 0.5 s
             if self.state == "in" and host and self.clock_offset is not None:
                 # u32 0, the time as 5 bytes of 19.2 MHz ticks, u32 0 (the plain keepalive in both captures)
                 self.send(host, [self.msg(T_KEEPALIVE, bytes(4) + (self._ticks() & (2 ** 40 - 1)).to_bytes(5, "big") + bytes(4))])
@@ -126,6 +128,7 @@ class Station:
     def _on_data(self, src: int, sport: int, dport: int, data: bytes) -> None:
         mac = self._macs().get(src)
         if self.crypto is None or mac is None:
+            self.log("ignored packet from %08x (%s)" % (src, "no key yet" if self.crypto is None else "no node with that address"))
             return
         body = self.crypto.open(data, mac)
         if body is None:
@@ -133,6 +136,15 @@ class Station:
             return
         self.peer_keys[src] = bytes(data[9:13])
         for m in parse_body(body):
+            if m.ptype != T_KEEPALIVE:  # trace everything but keepalives, to see where the join stops
+                line = "rx %08x type 0x%02x len %d [%s] %s" % (src, m.ptype, len(m.payload), self.state, m.payload[:16].hex())
+                if line == getattr(self, "_last_rx", None):  # the host repeats the same message: count, don't print
+                    self._rx_repeats = getattr(self, "_rx_repeats", 0) + 1
+                    if self._rx_repeats in (10, 100, 1000):
+                        self.log("  ... same message again, %d times so far" % self._rx_repeats)
+                else:
+                    self._last_rx, self._rx_repeats = line, 0
+                    self.log(line)
             self._message(src, m)
 
     def _message(self, src: int, m: Message) -> None:
@@ -152,16 +164,22 @@ class Station:
             req = joinmsgs.connect_request(station_id(host_mac), self.peer_keys[host], me,
                                            self.link.info.pia_session_id, self.link.name, int.from_bytes(os.urandom(4), "little"))
             self.send(host, [self.msg(T_CONNECT, req)])
+            self.req_pkt, self.req_sent = req, time.time()
             self.state = "requested"
             self.log("sent the join request")
         elif m.ptype == T_CONNECT and p[:3] == bytes.fromhex("020004") and len(p) >= 8:
+            self.host_seq = p[-4:]
             self.send(host, [self.msg(T_CONNECT, joinmsgs.connect_ack(p[-4:]))])  # CERTAIN: its last 4 bytes, unchanged
         elif m.ptype == T_CONNECT and p[:4] == bytes.fromhex("05000000") and len(p) == 8:
             self.host_ack4 = p[4:8]
             self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(p[4:8]))])
-        elif m.ptype == T_SESSION and p[:1] == b"\x02" and self.state == "requested":
-            self.state = "in"  # GUESS: that this (0x18 starting 02, 156 bytes) is "you're in"; the host repeats it
-            self.log("in the session")
+        elif m.ptype == T_SESSION and p[:1] == b"\x02" and getattr(self, "host_seq", None):
+            # CERTAIN (3 captures): the joiner acks the host's number + 1 for this message, each time it arrives
+            nxt = ((int.from_bytes(self.host_seq, "big") + 1) & 0xFFFFFFFF).to_bytes(4, "big")
+            self.send(host, [self.msg(T_CONNECT, joinmsgs.connect_ack(nxt))])
+            if self.state == "requested":
+                self.state = "in"
+                self.log("in the session")
         elif m.ptype == T_KEEPALIVE and len(p) == 13:
             host_ticks = int.from_bytes(p[4:9], "big")
             self.clock_offset = (host_ticks - int(time.monotonic() * self.conv.ticks_per_second)) & (2 ** 40 - 1)
