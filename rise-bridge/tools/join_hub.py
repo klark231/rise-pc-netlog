@@ -16,7 +16,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("server")
     ap.add_argument("--key", default="")
-    ap.add_argument("--hub", type=int, default=0)
+    ap.add_argument("--hub", type=int, required=True, help="index from the list; the list is printed first. Use your own hub (set a matchmaking key so only yours is listed)")
     ap.add_argument("--name", default="PCBridge")
     a = ap.parse_args()
     host, _, port = a.server.partition(":")
@@ -28,6 +28,8 @@ def main():
         print(i, hex(hid), [n["name"] for n in ni.nodes()])
     if not hubs:
         sys.exit("no hubs listed")
+    if not 0 <= a.hub < len(hubs):
+        sys.exit("--hub must be one of the numbers above")
     mac = bytes([0x02]) + os.urandom(5)  # a made-up MAC; the host doesn't check it
     link = hublink.Link(mac, a.name, bridge=True)
     link.join(server, hubs[a.hub][0], room)

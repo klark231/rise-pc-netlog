@@ -144,6 +144,9 @@ class Link:
         if t == REJECT:
             s.close()
             raise ConnectionError("the host turned us away (%d)" % (struct.unpack_from("<I", p)[0] if len(p) >= 4 else 0))
+        if t == INFO:
+            s.close()
+            raise ConnectionError("that host took us for a search and sent its network info: its app doesn't have netlog3.patch")
         if t != WELCOME or len(p) != 5 + INFO_SIZE:
             s.close()
             raise ConnectionError("unexpected answer (type %d, %d bytes)" % (t, len(p)))
