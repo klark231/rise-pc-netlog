@@ -2,7 +2,6 @@ name: Build
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -19,11 +18,22 @@ jobs:
         run: cmake -S . -B build -A x64
       - name: Build
         run: cmake --build build --config Release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build RiseBridge.exe
+        shell: pwsh
+        run: |
+          python -m pip install cryptography pyinstaller
+          python rise-bridge/tests/test_app.py
+          python -m PyInstaller --noconfirm --onefile --windowed --name RiseBridge --paths rise-bridge --paths rise-bridge/tools rise-bridge/rise_bridge_app.py
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item build/Release/dinput8.dll out/
+          Copy-Item dist/RiseBridge.exe out/
+          Copy-Item BRIDGE.md out/
           Copy-Item README.md out/
           Compress-Archive -Path out/* -DestinationPath rise-pc-netlog.zip
       - uses: actions/upload-artifact@v4

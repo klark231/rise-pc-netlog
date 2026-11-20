@@ -116,6 +116,16 @@ class Station:
     def send_game(self, dst: int, payload: bytes) -> None:
         self.send(dst, [self.msg(T_GAME, payload, dst)])
 
+    def leave_session(self) -> None:
+        """Tell the host we're going (Pia 0x08, empty), so it drops our station instead of waiting for a timeout."""
+        host, _ = self._host()
+        if host and self.state == "in":
+            try:
+                self.send(host, [self.msg(T_LEAVE, b"", host)])
+                self.log("told the host we're leaving")
+            except OSError:
+                pass
+
     def _ticks(self) -> int:
         return int(time.monotonic() * self.conv.ticks_per_second) + (self.clock_offset or 0)
 
@@ -175,9 +185,12 @@ class Station:
         elif m.ptype == T_CONNECT and p[:3] == bytes.fromhex("020004") and len(p) >= 8:
             self.host_seq = p[-4:]
             self.send(host, [self.msg(T_CONNECT, joinmsgs.connect_ack(p[-4:]))])  # CERTAIN: its last 4 bytes, unchanged
+            if self.host_ack4 is not None:  # the real joiners' order: ack the 949 first, then the session ack (01 fd)
+                self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(self.host_ack4))])
         elif m.ptype == T_CONNECT and p[:4] == bytes.fromhex("05000000") and len(p) == 8:
             self.host_ack4 = p[4:8]
-            self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(p[4:8]))])
+            if getattr(self, "host_seq", None):  # only once the 949 has been acked (the host's 05 ack can arrive before it)
+                self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(p[4:8]))])
         elif m.ptype == T_SESSION and p[:1] == b"\x02" and getattr(self, "host_seq", None):
             # CERTAIN (3 captures): the joiner acks the host's number + 1 for this message, each time it arrives
             nxt = ((int.from_bytes(self.host_seq, "big") + 1) & 0xFFFFFFFF).to_bytes(4, "big")
