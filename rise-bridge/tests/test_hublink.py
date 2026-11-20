@@ -7,11 +7,12 @@ from bridge import hublink as h
 def fake_host(srv, got):
     c, _ = srv.accept()
     t, p = h.read_frame(c)
-    assert t == h.HELLO and struct.unpack_from("<HHB", p) == (1, 0, 0)
+    assert t == h.HELLO and struct.unpack_from("<HHB", p) == (1, 0, 2)
     got["mac"], got["name"] = p[5:11], p[11:44].split(b"\0")[0]
     info = bytearray(h.INFO_SIZE)
     info[h.NI_NODE_MAX] = 4
     c.sendall(h.frame(h.WELCOME, bytes([2]) + struct.pack("<I", 0xA9FE6A03) + bytes(info)))
+    c.sendall(h.frame(h.KEY, b"\x01" + bytes(range(16))))
     t, p = h.read_frame(c)
     assert t == h.DATA
     got["data"] = p
@@ -24,7 +25,7 @@ def test_hello_welcome_data():
     srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
     got = {}
     threading.Thread(target=fake_host, args=(srv, got), daemon=True).start()
-    link = h.Link(bytes.fromhex("02c99f568d1a"), "Hunter")
+    link = h.Link(bytes.fromhex("02c99f568d1a"), "Hunter", bridge=True)
     rx = []
     link.on_data = lambda src, sp, dp, d: rx.append((hex(src), sp, dp, d))
     link.join_direct("127.0.0.1", srv.getsockname()[1])
@@ -34,6 +35,7 @@ def test_hello_welcome_data():
         if rx: break
         time.sleep(0.05)
     assert rx == [("0xa9fe6a01", 12345, 12345, b"pong")]
+    assert link.key == bytes(range(16))
     assert got["name"] == b"Hunter" and got["data"][12:] == b"ping"
 
 

@@ -18,7 +18,7 @@ INFO_SIZE = 0x480
 LIST, HOST, ATTACH, JOIN, UPDATE, PING = 1, 2, 3, 4, 5, 6
 HUBS, HOSTED, INCOMING, SPLICED, ERROR = 16, 17, 18, 19, 20
 # link types
-HELLO, WELCOME, INFO, DATA, BYE, LINK_PING, REJECT = 1, 2, 3, 4, 5, 6, 7
+HELLO, WELCOME, INFO, DATA, BYE, LINK_PING, REJECT, KEY = 1, 2, 3, 4, 5, 6, 7, 8
 
 # NetworkInfo offsets
 NI_SESSION_ID, NI_SEC_PARAM, NI_NODE_MAX, NI_NODE_COUNT, NI_NODES, NI_ADV_SIZE, NI_ADV = 0x10, 0x50, 0x66, 0x67, 0x68, 0x26A, 0x26C
@@ -109,9 +109,10 @@ class NetInfo:
 class Link:
     """One station's link to a hub's host. Call join(); datagrams arrive in on_data(from_addr, from_port, to_port, data)."""
 
-    def __init__(self, mac: bytes, name: str, lcv: int = 0):
+    def __init__(self, mac: bytes, name: str, lcv: int = 0, bridge: bool = False):
         assert len(mac) == 6
-        self.mac, self.name, self.lcv = mac, name, lcv
+        self.mac, self.name, self.lcv, self.bridge = mac, name, lcv, bridge
+        self.key: Optional[bytes] = None  # Pia's packet key, sent by a port that has netlog3.patch when bridge=True
         self.sock: Optional[socket.socket] = None
         self.node = -1
         self.address = 0  # host byte order
@@ -138,7 +139,7 @@ class Link:
 
     def _hello(self, s: socket.socket) -> None:
         name = self.name.encode("utf-8")[:32].ljust(33, b"\0")
-        s.sendall(frame(HELLO, struct.pack("<HHB", LINK_VERSION, self.lcv, 0) + self.mac + name))
+        s.sendall(frame(HELLO, struct.pack("<HHB", LINK_VERSION, self.lcv, 2 if self.bridge else 0) + self.mac + name))
         t, p = read_frame(s)
         if t == REJECT:
             s.close()
@@ -163,6 +164,8 @@ class Link:
                 elif t == INFO and len(p) == INFO_SIZE:
                     self.info = NetInfo(p)
                     self.on_info(self.info)
+                elif t == KEY and len(p) == 17:
+                    self.key = bytes(p[1:17]) if p[0] else None
                 elif t == LINK_PING:
                     self._send(LINK_PING)
                 elif t == BYE:
