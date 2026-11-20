@@ -15,7 +15,7 @@ import rise_net
 from bridge import pia
 
 
-def masks(body):
+def masks(body, limit=8):
     """The field mask byte of each message, walking the list as the reader does."""
     out, i, size = [], 0, 0
     while i < len(body):
@@ -29,7 +29,7 @@ def masks(body):
         if m & 4: i += 4
         if m & 8: i += 8
         i = (i + size + 3) & ~3
-    return " ".join(out[:8])
+    return " ".join(out[:limit])
 
 
 def main(path):
@@ -37,7 +37,7 @@ def main(path):
     if not key or session is None:
         sys.exit("no key or advertise data in the capture")
     crypto = pia.PiaCrypto(key, session)
-    n = dict(total=0, opened=0, body_same=0, packet_same=0, skipped=0)
+    n = dict(total=0, opened=0, body_same=0, only_padding_differs=0, other_differences=0, packet_same=0, skipped=0)
     shown = 0
     for pk in packets:
         d = bytes(pk["data"])
@@ -55,11 +55,17 @@ def main(path):
         core = rebuilt[:-1]  # without my 0xff terminator: a body may end right after its last message
         same_body = body[:len(core)] == core and set(body[len(core):]) <= {0xFF}
         n["body_same"] += same_body
+        if not same_body:
+            # same message list, same masks, same length: then only bytes between a payload and the next 4 boundary differ
+            padding_only = masks(body, 999) == masks(core + b"\xff", 999) and len(body) in range(len(core), len(core) + 2) \
+                and [m.payload for m in pia.parse_body(body)] == [m.payload for m in msgs]
+            n["only_padding_differs"] += padding_only
+            n["other_differences"] += not padding_only
         tail = d[0x0F]
         h = pia.Header(d[5:9], d[9:13], int.from_bytes(d[13:15], "big"), d[len(d) - tail:] if tail else b"", d[0x10:0x18])
         again = crypto.seal(body, mac, h)
         n["packet_same"] += again == d
-        if not same_body and shown < 4:
+        if not same_body and not padding_only and shown < 4:
             shown += 1
             print("differs at %s %s -> %s: %d messages, body %d bytes, mine %d" % (
                 pk["t"], pk["src"], pk["dst"], len(msgs), len(body), len(core)))
