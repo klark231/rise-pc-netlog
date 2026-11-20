@@ -60,6 +60,7 @@ def main(path):
                 and [m.payload for m in pia.parse_body(body)] == [m.payload for m in msgs]
             n["only_padding_differs"] += padding_only
             n["other_differences"] += not padding_only
+        tail = d[0x0F]
         h = pia.Header(d[5:9], d[9:13], int.from_bytes(d[13:15], "big"), d[len(d) - tail:] if tail else b"", d[0x10:0x18])
         again = crypto.seal(body, mac, h)
         n["packet_same"] += again == d
