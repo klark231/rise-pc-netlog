@@ -35,7 +35,7 @@ def main(path):
         n["opened"] += 1
         msgs = pia.parse_body(body)
         rebuilt = pia.build_body(msgs)
-        same_body = body[:len(rebuilt)] == rebuilt and len(body) - len(rebuilt) in (0, 1, 2, 3)
+        same_body = body[:len(rebuilt)] == rebuilt and set(body[len(rebuilt):]) <= {0xFF}  # the rest of the packet is 0xff padding
         n["body_same"] += same_body
         tail = d[0x0F]
         h = pia.Header(d[5:9], d[9:13], int.from_bytes(d[13:15], "big"), d[len(d) - tail:] if tail else b"", d[0x10:0x18])

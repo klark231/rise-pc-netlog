@@ -36,7 +36,8 @@ def build_body(messages: List[Message]) -> bytes:
     """A message list: field mask, the fields that differ from the message before, payload padded to 4, 0xff at the end."""
     out = bytearray()
     prev = {"flags": 0, "size": 0, "ptype": 0, "port": 0, "dst": 0}
-    for m in messages:
+    for first, m in enumerate(messages):
+        first = first == 0
         cur = {"flags": m.flags, "size": len(m.payload), "ptype": m.ptype, "port": m.port, "dst": m.dst}
         mask = 0
         fields = bytearray()
@@ -53,6 +54,12 @@ def build_body(messages: List[Message]) -> bytes:
         if cur["dst"] != prev["dst"]:
             mask |= 8
             fields += struct.pack(">Q", cur["dst"])
+        if first:
+            # CERTAIN (every packet of a capture): the first message has mask 0x7f with all four fields written.
+            # Bits 0x10, 0x20, 0x40 add no bytes in anything captured; later messages' masks are still unchecked.
+            mask = 0x7F
+            fields = bytearray([cur["flags"]]) + struct.pack(">H", cur["size"]) + bytes([cur["ptype"]]) \
+                + cur["port"].to_bytes(3, "big") + struct.pack(">Q", cur["dst"])
         out.append(mask)
         out += fields
         out += m.payload
