@@ -30,6 +30,10 @@ class Conventions:
 class Station:
     def __init__(self, link: Link, conv: Optional[Conventions] = None, log: Callable[[str], None] = print):
         self.link, self.conv, self.log = link, conv or Conventions(), log
+        self.verbose = False
+        self._first = True
+        self._pending = None      # the join messages to repeat until the host acks (the real joiner repeats them ~every 0.4 s)
+        self._pending_dst = 0
         self.key = os.urandom(4)       # GUESS: this station's key is just random
         self.rand = os.urandom(4)
         self.crypto: Optional[PiaCrypto] = None
@@ -39,6 +43,16 @@ class Station:
         self.state = "waiting"                    # waiting -> requested -> in
         self.clock_offset: Optional[int] = None  # host ticks - ours, once the host has sent a keepalive
         self.host_ack4: Optional[bytes] = None
+        self.host_hello: Optional[bytes] = None   # the 8 bytes of the hello the host sent us: its value for OUR mac
+        self.hello_seen = threading.Event()
+        self.hello_to_send: Optional[bytes] = None  # 8 bytes: the hello value the host expects for ITS mac
+        self._hello_template: Optional[bytes] = None  # the last 15-byte hello the host sent: its 3-byte prefix and scramble byte are reused
+        self.hello_msg: Optional[bytes] = None   # the complete 15-byte hello to send (bridge/hello.py hello_message_for_mac)
+        self.hello_answered = False
+        self.echo = False                # answer the host's 12/9/8-byte game messages by sending the same bytes back (what the captured joiner does for 9 and 8)
+        self._seen_game = {}
+        self._rx_counts = {}
+        self._echoed_at = {}
         self.on_game: Callable[[int, bytes], None] = lambda addr, payload: None
         self.on_leave: Callable[[int], None] = lambda addr: None
         self.ack_seq = 0
@@ -65,35 +79,32 @@ class Station:
         return None, None
 
     # ---- sending ----
-    def _trailer_entry(self, key: bytes) -> bytes:
-        c = self.conv.trailer
-        part = key[0:2] if c.startswith("k02") else key[2:4]
-        return part[::-1] if c.endswith("r") else part
+    def _trailer(self) -> bytes:
+        """CERTAIN (second capture): key[2:4] of every member in node order, this station included."""
+        keys = dict(self.peer_keys)
+        keys[self.link.address] = self.key
+        return b"".join(keys[a][2:4] for a in sorted(keys, key=self._node_of))
 
-    def send(self, dst: int, messages) -> None:
+    def send(self, dst: int, messages, kind: str = "data") -> None:
+        """kind, as the captured joiner does it (all unicast to the host):
+        join      receiver key 0, counter 0   (0x24 reply, 0x14 request, 0x18 01fd)
+        ack       receiver key = the host's, counter 0   (the 8-byte 0x14 ack)
+        keepalive receiver key 0, trailer = all members' keys, counter 0   (0x58)
+        data      receiver key = the host's, counter counts up   (0x1c, 0x68, 0x08)"""
         if self.crypto is None:
             return
-        broadcast = (dst & 0xFF) == 0xFF
-        if broadcast:  # CERTAIN: receiver key 0, the trailer lists each receiver
-            rkey = bytes(4)
-            trailer = b"".join(self._trailer_entry(k) for a, k in self.peer_keys.items() if a != self.link.address)
-            counter = 0
-        else:
-            # CERTAIN (3 real captures, ~20000 packets): the receiver key is ZERO for the join-time messages
-            # (0x24 reply, 0x14 request "01"/"02", 0x18, 0x58) and the peer's key for the rest (0x14 ack "05",
-            # 0x1c, 0x68, 0x08). A request with the host's key in it is what the host ignored.
-            zero = all(m.ptype in (T_MESH, T_SESSION, T_KEEPALIVE) or
-                       (m.ptype == T_CONNECT and m.payload[:1] in (b"\x01", b"\x02")) for m in messages)
-            rkey = bytes(4) if zero else self.peer_keys.get(dst, bytes(4))
-            trailer = b""
+        rkey, trailer, counter = bytes(4), b"", 0
+        if kind in ("ack", "data"):
+            rkey = self.peer_keys.get(dst, bytes(4))
+        if kind == "keepalive":
+            trailer = self._trailer()
+        if kind == "data":
             counter = self.counters[dst] = (self.counters.get(dst, 0) + 1) & 0xFFFF
+        sender_key = bytes(4) if self._first else self.key  # CERTAIN: the very first packet has sender key 0
+        self._first = False
         self.nonce += 1
-        h = Header(rkey, self.key, counter, trailer, self.nonce.to_bytes(8, self.conv.nonce_order))
-        # counter_order is applied by Header's packing (big endian); flip here if the capture says little
-        pkt = self.crypto.seal(build_body(messages), self.link.mac, h)
-        if self.conv.counter_order == "little":
-            pkt = pkt[:13] + struct.pack("<H", counter) + pkt[15:]  # NOTE: this breaks nothing: the counter isn't in the nonce
-        self.link.send(PORT, dst, PORT, pkt)
+        h = Header(rkey, sender_key, counter, trailer, self.nonce.to_bytes(8, self.conv.nonce_order))
+        self.link.send(PORT, dst, PORT, self.crypto.seal(build_body(messages), self.link.mac, h))
 
     def _node_of(self, addr: int) -> int:
         for n in self.link.info.nodes():
@@ -114,17 +125,14 @@ class Station:
         return Message(ptype, payload, port=0, flags=flags, dst=dst)
 
     def send_game(self, dst: int, payload: bytes) -> None:
-        self.send(dst, [self.msg(T_GAME, payload, dst)])
+        self.send(dst, [self.msg(T_GAME, payload, dst)], "data")
 
-    def leave_session(self) -> None:
-        """Tell the host we're going (Pia 0x08, empty), so it drops our station instead of waiting for a timeout."""
-        host, _ = self._host()
-        if host and self.state == "in":
-            try:
-                self.send(host, [self.msg(T_LEAVE, b"", host)])
-                self.log("told the host we're leaving")
-            except OSError:
-                pass
+    def _make_hello(self, value: bytes) -> bytes:
+        """The 15-byte hello: 3 bytes (copied from the host's), then 00 01 03 02 + the 8-byte value, each xor-ed with the byte at 3
+        (the scramble byte, also copied; its own scrambled form is that byte itself). GUESS: that the 3 prefix bytes aren't checked."""
+        t = self._hello_template
+        k = t[3]
+        return t[:3] + bytes(b ^ k for b in bytes.fromhex("00010302") + value)
 
     def _ticks(self) -> int:
         return int(time.monotonic() * self.conv.ticks_per_second) + (self.clock_offset or 0)
@@ -132,34 +140,34 @@ class Station:
     def _keepalives(self) -> None:
         while self.link.sock is not None and self.link.sock.fileno() != -1:
             host, _ = self._host()
-            if self.state == "requested" and host and self.host_ack4 is None and getattr(self, "req_pkt", None):
-                self.send(host, [self.msg(T_CONNECT, self.req_pkt)])  # a real joiner resends about every 0.5 s
             if self.state == "in" and host and self.clock_offset is not None:
                 # u32 0, the time as 5 bytes of 19.2 MHz ticks, u32 0 (the plain keepalive in both captures)
-                self.send(host, [self.msg(T_KEEPALIVE, bytes(4) + (self._ticks() & (2 ** 40 - 1)).to_bytes(5, "big") + bytes(4))])
-            time.sleep(0.5)
+                self.send(host, [self.msg(T_KEEPALIVE, bytes(4) + (self._ticks() & (2 ** 40 - 1)).to_bytes(5, "big") + bytes(4))], "keepalive")
+            if self.state == "in" and host and not self.hello_answered:
+                hello = self.hello_msg or (self._make_hello(self.hello_to_send) if self.hello_to_send and self._hello_template else None)
+                if hello:
+                    self.send(host, [self.msg(T_GAME, hello, host)], "data")
+            if self.state == "requested" and self._pending:
+                for m in self._pending:
+                    self.send(self._pending_dst, [m], "join")
+            time.sleep(0.4)
 
     # ---- receiving ----
     def _on_data(self, src: int, sport: int, dport: int, data: bytes) -> None:
         mac = self._macs().get(src)
         if self.crypto is None or mac is None:
-            self.log("ignored packet from %08x (%s)" % (src, "no key yet" if self.crypto is None else "no node with that address"))
             return
         body = self.crypto.open(data, mac)
         if body is None:
-            self.log("bad tag from %08x" % src)
+            self.log("bad tag from %08x (%d bytes)" % (src, len(data)))
             return
         self.peer_keys[src] = bytes(data[9:13])
         for m in parse_body(body):
-            if m.ptype != T_KEEPALIVE:  # trace everything but keepalives, to see where the join stops
-                line = "rx %08x type 0x%02x len %d [%s] %s" % (src, m.ptype, len(m.payload), self.state, m.payload[:16].hex())
-                if line == getattr(self, "_last_rx", None):  # the host repeats the same message: count, don't print
-                    self._rx_repeats = getattr(self, "_rx_repeats", 0) + 1
-                    if self._rx_repeats in (10, 100, 1000):
-                        self.log("  ... same message again, %d times so far" % self._rx_repeats)
-                else:
-                    self._last_rx, self._rx_repeats = line, 0
-                    self.log(line)
+            if self.verbose and m.ptype != T_KEEPALIVE:
+                kk = (src, m.ptype, len(m.payload), m.payload[:6])
+                n = self._rx_counts[kk] = self._rx_counts.get(kk, 0) + 1
+                if n == 1:  # the first time only; the host repeats most of them many times
+                    self.log("rx from %08x: type 0x%02x, %d bytes, starts %s" % (src, m.ptype, len(m.payload), m.payload[:6].hex()))
             self._message(src, m)
 
     def _message(self, src: int, m: Message) -> None:
@@ -172,39 +180,53 @@ class Station:
                 self.on_leave(src)
             return
         if m.ptype == T_MESH and p[:2] == bytes.fromhex("0111") and self.state == "waiting":
-            # the host's station list: answer it, then ask the host to connect us
-            self.send((self.link.address & 0xFFFFFF00) | 0xFF, [self.msg(T_MESH, joinmsgs.mesh_reply(p[0x0C]))])
+            # the host's station list: answer it (unicast to the host, as the captured joiner does), then ask to connect
+            reply = self.msg(T_MESH, joinmsgs.mesh_reply(p[0x0C]))
             me = joinmsgs.station(".".join(str(self.link.address >> s & 255) for s in (24, 16, 8, 0)), PORT,
                                   station_id(self.link.mac), self.key, self.rand)
             req = joinmsgs.connect_request(station_id(host_mac), self.peer_keys[host], me,
                                            self.link.info.pia_session_id, self.link.name, int.from_bytes(os.urandom(4), "little"))
-            self.send(host, [self.msg(T_CONNECT, req)])
-            self.req_pkt, self.req_sent = req, time.time()
+            self._pending = [reply, self.msg(T_CONNECT, req)]
+            self._pending_dst = host
+            for pm in self._pending:
+                self.send(host, [pm], "join")
             self.state = "requested"
-            self.log("sent the join request")
-        elif m.ptype == T_CONNECT and p[:3] == bytes.fromhex("020004") and len(p) >= 8:
-            self.host_seq = p[-4:]
-            self.send(host, [self.msg(T_CONNECT, joinmsgs.connect_ack(p[-4:]))])  # CERTAIN: its last 4 bytes, unchanged
-            if self.host_ack4 is not None:  # the real joiners' order: ack the 949 first, then the session ack (01 fd)
-                self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(self.host_ack4))])
+            self.log("sent the join request (repeated until the host acks)")
         elif m.ptype == T_CONNECT and p[:4] == bytes.fromhex("05000000") and len(p) == 8:
             self.host_ack4 = p[4:8]
-            if getattr(self, "host_seq", None):  # only once the 949 has been acked (the host's 05 ack can arrive before it)
-                self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(p[4:8]))])
-        elif m.ptype == T_SESSION and p[:1] == b"\x02" and getattr(self, "host_seq", None):
-            # CERTAIN (3 captures): the joiner acks the host's number + 1 for this message, each time it arrives
-            nxt = ((int.from_bytes(self.host_seq, "big") + 1) & 0xFFFFFFFF).to_bytes(4, "big")
-            self.send(host, [self.msg(T_CONNECT, joinmsgs.connect_ack(nxt))])
-            if self.state == "requested":
-                self.state = "in"
-                self.log("in the session")
+            self._pending = None  # the host has our request
+            self.send(host, [self.msg(T_SESSION, joinmsgs.session_ack_for(p[4:8]))], "join")
+        elif m.ptype == T_CONNECT and p[:3] == bytes.fromhex("020004") and len(p) >= 8:
+            self.send(host, [self.msg(T_CONNECT, joinmsgs.connect_ack(p[-4:]))], "ack")  # CERTAIN: its last 4 bytes, unchanged
+        elif m.ptype == T_SESSION and p[:1] == b"\x20" and len(p) > 500 and not self.hello_answered:
+            if self.hello_to_send or self.hello_msg:
+                self.hello_answered = True
+                self.log("the host moved on after our hello (0x18, %d bytes)" % len(p))
+        elif m.ptype == T_SESSION and p[:1] == b"\x02" and self.state == "requested":
+            self.state = "in"  # GUESS: that this (0x18 starting 02, 156 bytes) is "you're in"; the host repeats it
+            self.log("in the session")
         elif m.ptype == T_KEEPALIVE and len(p) == 13:
             host_ticks = int.from_bytes(p[4:9], "big")
             self.clock_offset = (host_ticks - int(time.monotonic() * self.conv.ticks_per_second)) & (2 ** 40 - 1)
             if self.state == "in" and not getattr(self, "_clock_sent", False):
                 self._clock_sent = True
-                self.send(host, [self.msg(T_CLOCK, self._ticks().to_bytes(8, "big") + bytes(8), host)])
+                self.send(host, [self.msg(T_CLOCK, self._ticks().to_bytes(8, "big") + bytes(8), host)], "data")
         elif m.ptype == T_GAME:
+            if len(p) == 15:  # the hello: 3 bytes, then a body xor-ed with byte 3 (rise_net.unscramble)
+                body = bytes(b ^ p[3] for b in p[3:])
+                if body[:4] == bytes.fromhex("00010302"):
+                    self._hello_template = bytes(p)
+                    self.host_hello = body[4:12]
+                    self.hello_seen.set()
+            if p not in self._seen_game:
+                self._seen_game[p] = time.time()
+                if self.verbose:
+                    k = p[3] if len(p) > 3 else 0
+                    self.log("NEW game message from the host: %d bytes, plain %s" % (len(p), bytes(b ^ k for b in p[3:]).hex()))
+            if self.echo and len(p) in (8, 9, 12) and src == host and time.time() - self._echoed_at.get(p, 0) > 0.3 \
+                    and self.state == "in":
+                self._echoed_at[p] = time.time()
+                self.send_game(host, p)
             self.on_game(src, p)
         elif m.ptype == T_LEAVE:
             self.on_leave(src)

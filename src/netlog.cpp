@@ -23,8 +23,6 @@
 
 #include <MinHook.h>
 
-#include "bridge.h"
-
 #include <atomic>
 #include <cstdarg>
 #include <cstdint>
@@ -155,42 +153,19 @@ uint64_t identity_id(const void* identity) {
 }
 
 int __fastcall send_user(void* self, const void* to, const void* data, uint32_t size, int flags, int channel) {
-    if (bridge::fake_user(identity_id(to))) {  // the Switch host's stand-in: goes to the daemon, not to Steam
-        log_packet('>', "SendMessageToUser(bridge)", identity_id(to), channel, data, size);
-        bridge::send_to_host(data, size, channel);
-        return 1;  // k_EResultOK
-    }
     log_packet('>', "SendMessageToUser", identity_id(to), channel, data, size);
     return g_send_user(self, to, data, size, flags, channel);
 }
 
 int __fastcall receive_channel(void* self, int channel, Message** out, int max) {
-    int n = g_receive_channel(self, channel, out, max);
-    if (bridge::on() && out && n < max) n += bridge::receive(channel, reinterpret_cast<void**>(out + n), max - n);
+    const int n = g_receive_channel(self, channel, out, max);
     for (int k = 0; k < n && out; k++)
         if (out[k]) log_packet('<', "ReceiveMessagesOnChannel", out[k]->peer.steam_id, out[k]->channel, out[k]->data, out[k]->size);
     return n;
 }
 
-using SessionFn = bool(__fastcall*)(void*, const void*);
-SessionFn g_accept_session = nullptr, g_close_session = nullptr;
-
-bool __fastcall accept_session(void* self, const void* who) {
-    if (bridge::fake_user(identity_id(who))) return true;
-    return g_accept_session(self, who);
-}
-
-bool __fastcall close_session(void* self, const void* who) {
-    if (bridge::fake_user(identity_id(who))) return true;
-    return g_close_session(self, who);
-}
-
 void wrap_messages(void* m) {
     if (!m) return;
-    if (bridge::on()) {
-        if (void* was = swap_slot(m, 2, reinterpret_cast<void*>(&accept_session))) g_accept_session = reinterpret_cast<SessionFn>(was);
-        if (void* was = swap_slot(m, 3, reinterpret_cast<void*>(&close_session))) g_close_session = reinterpret_cast<SessionFn>(was);
-    }
     if (void* was = swap_slot(m, 0, reinterpret_cast<void*>(&send_user))) g_send_user = reinterpret_cast<SendToUser>(was);
     if (void* was = swap_slot(m, 1, reinterpret_cast<void*>(&receive_channel)))
         g_receive_channel = reinterpret_cast<ReceiveOnChannel>(was);
@@ -274,7 +249,6 @@ void log_read(const char* what, uint64_t lobby, uint64_t member, const char* key
 
 uint64_t __fastcall request_list(void* self) {
     log_line("RequestLobbyList\n");
-    if (bridge::on()) return bridge::request_list();
     return g_request_list(self);
 }
 
@@ -295,18 +269,16 @@ uint64_t __fastcall create_lobby(void* self, int type, int max) {
 
 uint64_t __fastcall join_lobby(void* self, uint64_t lobby) {
     log_line("JoinLobby %llu\n", static_cast<unsigned long long>(lobby));
-    if (bridge::fake_lobby(lobby)) return bridge::join(lobby);
     return g_join_lobby(self, lobby);
 }
 
 void __fastcall leave_lobby(void* self, uint64_t lobby) {
     log_line("LeaveLobby %llu\n", static_cast<unsigned long long>(lobby));
-    if (bridge::fake_lobby(lobby)) return bridge::leave(lobby);
     g_leave_lobby(self, lobby);
 }
 
 const char* __fastcall get_lobby_data(void* self, uint64_t lobby, const char* key) {
-    const char* v = bridge::fake_lobby(lobby) ? bridge::lobby_data(lobby, key) : g_get_lobby_data(self, lobby, key);
+    const char* v = g_get_lobby_data(self, lobby, key);
     log_read("GetLobbyData", lobby, 0, key, v);
     return v;
 }
@@ -314,12 +286,11 @@ const char* __fastcall get_lobby_data(void* self, uint64_t lobby, const char* ke
 bool __fastcall set_lobby_data(void* self, uint64_t lobby, const char* key, const char* value) {
     log_line("SetLobbyData lobby %llu \"%s\" = \"%s\"\n", static_cast<unsigned long long>(lobby), key ? key : "",
              value ? value : "");
-    if (bridge::fake_lobby(lobby)) return true;
     return g_set_lobby_data(self, lobby, key, value);
 }
 
 const char* __fastcall get_member_data(void* self, uint64_t lobby, uint64_t member, const char* key) {
-    const char* v = bridge::fake_lobby(lobby) ? bridge::member_data(lobby, member, key) : g_get_member_data(self, lobby, member, key);
+    const char* v = g_get_member_data(self, lobby, member, key);
     log_read("GetLobbyMemberData", lobby, member, key, v);
     return v;
 }
@@ -327,18 +298,15 @@ const char* __fastcall get_member_data(void* self, uint64_t lobby, uint64_t memb
 void __fastcall set_member_data(void* self, uint64_t lobby, const char* key, const char* value) {
     log_line("SetLobbyMemberData lobby %llu \"%s\" = \"%s\"\n", static_cast<unsigned long long>(lobby), key ? key : "",
              value ? value : "");
-    if (bridge::fake_lobby(lobby)) return;
     g_set_member_data(self, lobby, key, value);
 }
 
 bool __fastcall send_chat(void* self, uint64_t lobby, const void* data, int size) {
     log_packet('>', "SendLobbyChatMsg", lobby, -1, data, size > 0 ? static_cast<size_t>(size) : 0);
-    if (bridge::fake_lobby(lobby)) return true;
     return g_send_chat(self, lobby, data, size);
 }
 
 int __fastcall get_chat_entry(void* self, uint64_t lobby, int id, uint64_t* user, void* data, int cap, int* type) {
-    if (bridge::fake_lobby(lobby)) return 0;
     const int n = g_get_chat_entry(self, lobby, id, user, data, cap, type);
     if (n > 0) log_packet('<', "GetLobbyChatEntry", user ? *user : 0, type ? *type : -1, data, static_cast<size_t>(n));
     return n;
@@ -348,85 +316,6 @@ int __fastcall get_chat_entry(void* self, uint64_t lobby, int id, uint64_t* user
 template <typename F>
 void wrap_slot(void* obj, int i, F hook, F& original) {
     if (void* was = swap_slot(obj, i, reinterpret_cast<void*>(hook))) original = reinterpret_cast<F>(was);
-}
-
-// ---- bridge mode: the rest of the lobby calls the game makes on a lobby that isn't Steam's -------------------------------
-// ISteamMatchmaking: GetLobbyByIndex 12, GetNumLobbyMembers 17, GetLobbyMemberByIndex 18, GetLobbyMemberLimit 32,
-// GetLobbyOwner 35. ISteamUser: GetSteamID 2.
-void* g_user = nullptr;
-uint64_t my_id() {
-    if (!g_user) return 0;
-    // A CSteamID is returned through a hidden pointer (it has constructors, so it isn't returned in RAX on Windows x64)
-    auto fn = reinterpret_cast<uint64_t*(__fastcall*)(void*, uint64_t*)>((*static_cast<void***>(g_user))[2]);
-    uint64_t id = 0;
-    fn(g_user, &id);
-    return id;
-}
-
-// The ones that return a CSteamID (GetLobbyByIndex, GetLobbyMemberByIndex, GetLobbyOwner) take a hidden result pointer
-// as the 2nd argument and give it back in RAX; the other arguments move up one place.
-using ByIndex = uint64_t*(__fastcall*)(void*, uint64_t*, int);
-using NumMembers = int(__fastcall*)(void*, uint64_t);
-using MemberByIndex = uint64_t*(__fastcall*)(void*, uint64_t*, uint64_t, int);
-using LobbyOwner = uint64_t*(__fastcall*)(void*, uint64_t*, uint64_t);
-ByIndex g_by_index = nullptr;
-NumMembers g_num_members = nullptr, g_member_limit = nullptr;
-MemberByIndex g_member_by_index = nullptr;
-LobbyOwner g_lobby_owner = nullptr;
-
-uint64_t* __fastcall by_index(void* self, uint64_t* ret, int i) {
-    if (bridge::on()) {
-        *ret = bridge::lobby_by_index(i);
-        return ret;
-    }
-    return g_by_index(self, ret, i);
-}
-int __fastcall num_members(void* self, uint64_t lobby) {
-    return bridge::fake_lobby(lobby) ? bridge::member_count(lobby) : g_num_members(self, lobby);
-}
-int __fastcall member_limit(void* self, uint64_t lobby) {
-    return bridge::fake_lobby(lobby) ? 4 : g_member_limit(self, lobby);
-}
-uint64_t* __fastcall member_by_index(void* self, uint64_t* ret, uint64_t lobby, int i) {
-    if (!bridge::fake_lobby(lobby)) return g_member_by_index(self, ret, lobby, i);
-    *ret = bridge::member_by_index(lobby, i, my_id());
-    return ret;
-}
-uint64_t* __fastcall lobby_owner(void* self, uint64_t* ret, uint64_t lobby) {
-    if (!bridge::fake_lobby(lobby)) return g_lobby_owner(self, ret, lobby);
-    *ret = bridge::owner(lobby);
-    return ret;
-}
-
-// ISteamUtils: IsAPICallCompleted 11, GetAPICallFailureReason 12, GetAPICallResult 13
-using IsCompleted = bool(__fastcall*)(void*, uint64_t, bool*);
-using FailureReason = int(__fastcall*)(void*, uint64_t);
-using GetResult = bool(__fastcall*)(void*, uint64_t, void*, int, int, bool*);
-IsCompleted g_is_completed = nullptr;
-FailureReason g_failure_reason = nullptr;
-GetResult g_get_result = nullptr;
-
-bool __fastcall is_completed(void* self, uint64_t h, bool* failed) {
-    if (bridge::is_completed(h)) {
-        if (failed) *failed = false;
-        return true;
-    }
-    return g_is_completed(self, h, failed);
-}
-int __fastcall failure_reason(void* self, uint64_t h) {
-    return bridge::is_completed(h) ? -1 : g_failure_reason(self, h);  // -1: none
-}
-bool __fastcall get_result(void* self, uint64_t h, void* out, int cap, int expected, bool* failed) {
-    if (bridge::get_result(h, out, cap, expected, failed)) return true;
-    return g_get_result(self, h, out, cap, expected, failed);
-}
-
-void wrap_utils(void* u) {
-    if (!u || !bridge::on()) return;
-    wrap_slot(u, 11, &is_completed, g_is_completed);
-    wrap_slot(u, 12, &failure_reason, g_failure_reason);
-    wrap_slot(u, 13, &get_result, g_get_result);
-    log_line("bridge: ISteamUtils call results wrapped\n");
 }
 
 void wrap_matchmaking(void* m) {
@@ -443,13 +332,6 @@ void wrap_matchmaking(void* m) {
     wrap_slot(m, 25, &set_member_data, g_set_member_data);
     wrap_slot(m, 26, &send_chat, g_send_chat);
     wrap_slot(m, 27, &get_chat_entry, g_get_chat_entry);
-    if (bridge::on()) {
-        wrap_slot(m, 12, &by_index, g_by_index);
-        wrap_slot(m, 17, &num_members, g_num_members);
-        wrap_slot(m, 18, &member_by_index, g_member_by_index);
-        wrap_slot(m, 32, &member_limit, g_member_limit);
-        wrap_slot(m, 35, &lobby_owner, g_lobby_owner);
-    }
 }
 
 // ---- ISteamClient: GetISteamGenericInterface 12, GetISteamNetworking 16 -------------------------------------------------
@@ -470,8 +352,6 @@ void note_interface(const char* how, const char* version) {
 void wrap_by_name(const char* version, void* itf) {
     if (!version || !itf) return;
     if (!strncmp(version, "SteamMatchMaking0", 17)) wrap_matchmaking(itf);
-    else if (!strncmp(version, "SteamUtils0", 11)) wrap_utils(itf);
-    else if (!strncmp(version, "SteamUser0", 10)) g_user = itf;
     else if (!strncmp(version, "SteamNetworkingMessages", 23)) wrap_messages(itf);
     else if (!strncmp(version, "SteamNetworkingSockets", 22)) wrap_sockets(itf);
     else if (!strncmp(version, "SteamNetworking", 15)) wrap_networking(itf);
@@ -511,91 +391,6 @@ void* __cdecl create_interface(const char* version, int* rc) {
     return itf;
 }
 
-struct CallbackMsg {
-    int user;
-    int id;
-    uint8_t* param;
-    int size;
-};
-using BGetCallback = bool(__cdecl*)(int, CallbackMsg*);
-using FreeLastCallback = bool(__cdecl*)(int);
-BGetCallback g_bget_callback = nullptr;
-FreeLastCallback g_free_last_callback = nullptr;
-int g_last_user = 1;
-bool g_fake_callback = false;
-
-bool __cdecl bget_callback(int pipe, CallbackMsg* msg) {
-    static bool first = true;
-    if (first) {
-        first = false;
-        log_line("bridge: the game polls Steam_BGetCallback\n");
-    }
-    if (bridge::on() && msg) {
-        int id, size;
-        const uint8_t* data;
-        if (bridge::pop_callback(&id, &data, &size)) {
-            msg->user = g_last_user;
-            msg->id = id;
-            msg->param = const_cast<uint8_t*>(data);
-            msg->size = size;
-            g_fake_callback = true;
-            return true;
-        }
-    }
-    g_fake_callback = false;
-    const bool ok = g_bget_callback(pipe, msg);
-    if (ok && msg) g_last_user = msg->user;
-    return ok;
-}
-
-bool __cdecl free_last_callback(int pipe) {
-    if (g_fake_callback) {
-        g_fake_callback = false;
-        bridge::free_callback();
-        return true;
-    }
-    return g_free_last_callback(pipe);
-}
-
-// The game polls Steam_BGetCallback itself (manual dispatch), so it also reads the call results itself, with
-// Steam_GetAPICallResult (steamclient / what stands in for it) or its steam_api wrapper
-// SteamAPI_ManualDispatch_GetAPICallResult, not through ISteamUtils. Both take (pipe, call, buffer, size, expected callback, failed*).
-using ManualGetResult = bool(__cdecl*)(int, uint64_t, void*, int, int, bool*);
-ManualGetResult g_client_get_result = nullptr;
-ManualGetResult g_flat_get_result = nullptr;
-
-bool manual_result(const char* who, int pipe, uint64_t h, void* out, int cap, int expected, bool* failed) {
-    static bool first = true;
-    if (first) {
-        first = false;
-        log_line("bridge: the game reads call results with %s\n", who);
-    }
-    return bridge::on() && bridge::get_result(h, out, cap, expected, failed);
-}
-bool __cdecl client_get_result(int pipe, uint64_t h, void* out, int cap, int expected, bool* failed) {
-    if (manual_result("Steam_GetAPICallResult", pipe, h, out, cap, expected, failed)) return true;
-    return g_client_get_result(pipe, h, out, cap, expected, failed);
-}
-bool __cdecl flat_get_result(int pipe, uint64_t h, void* out, int cap, int expected, bool* failed) {
-    if (manual_result("SteamAPI_ManualDispatch_GetAPICallResult", pipe, h, out, cap, expected, failed)) return true;
-    return g_flat_get_result(pipe, h, out, cap, expected, failed);
-}
-
-std::atomic<bool> g_hooked_flat{false};
-// steam_api64.dll (or what stands in for it): the flat manual-dispatch wrapper
-void check_flat(HMODULE m) {
-    if (!m || g_hooked_flat || !bridge::on()) return;
-    auto* f = reinterpret_cast<void*>(GetProcAddress(m, "SteamAPI_ManualDispatch_GetAPICallResult"));
-    if (!f || g_hooked_flat.exchange(true)) return;
-    char name[MAX_PATH] = "?";
-    GetModuleFileNameA(m, name, MAX_PATH);
-    if (MH_CreateHook(f, reinterpret_cast<void*>(&flat_get_result), reinterpret_cast<void**>(&g_flat_get_result)) == MH_OK &&
-        MH_EnableHook(f) == MH_OK)
-        log_line("bridge: hooked SteamAPI_ManualDispatch_GetAPICallResult in %s\n", name);
-    else
-        log_line("bridge: couldn't hook SteamAPI_ManualDispatch_GetAPICallResult in %s\n", name);
-}
-
 std::atomic<bool> g_hooked_client{false};
 
 // A Steam client library: it exports CreateInterface and Steam_CreateSteamPipe (only steamclient64.dll and what stands
@@ -612,22 +407,6 @@ void check_module(HMODULE m) {
         log_line("Steam client library: %s\n", name);
     else
         log_line("couldn't hook CreateInterface in %s\n", name);
-    if (bridge::on()) {
-        auto* bg = reinterpret_cast<void*>(GetProcAddress(m, "Steam_BGetCallback"));
-        auto* fl = reinterpret_cast<void*>(GetProcAddress(m, "Steam_FreeLastCallback"));
-        if (bg && fl && MH_CreateHook(bg, reinterpret_cast<void*>(&bget_callback), reinterpret_cast<void**>(&g_bget_callback)) == MH_OK &&
-            MH_CreateHook(fl, reinterpret_cast<void*>(&free_last_callback), reinterpret_cast<void**>(&g_free_last_callback)) == MH_OK &&
-            MH_EnableHook(bg) == MH_OK && MH_EnableHook(fl) == MH_OK)
-            log_line("bridge: hooked Steam_BGetCallback / Steam_FreeLastCallback in %s\n", name);
-        else
-            log_line("bridge: couldn't hook the callback functions in %s: lobby results can't be delivered\n", name);
-        auto* gr = reinterpret_cast<void*>(GetProcAddress(m, "Steam_GetAPICallResult"));
-        if (gr && MH_CreateHook(gr, reinterpret_cast<void*>(&client_get_result), reinterpret_cast<void**>(&g_client_get_result)) == MH_OK &&
-            MH_EnableHook(gr) == MH_OK)
-            log_line("bridge: hooked Steam_GetAPICallResult in %s\n", name);
-        else
-            log_line("bridge: no Steam_GetAPICallResult to hook in %s\n", name);
-    }
 }
 
 using LoadLibraryExWFn = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
@@ -636,17 +415,11 @@ LoadLibraryExWFn g_load_library = nullptr;
 HMODULE WINAPI load_library(LPCWSTR name, HANDLE file, DWORD flags) {
     HMODULE m = g_load_library(name, file, flags);
     if (m && !(flags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)))
-    {
         check_module(m);
-        check_flat(m);
-    }
     return m;
 }
 
 void start() {
-    bridge::set_log([](const char* line) { log_line("bridge: %s\n", line); });
-    bridge::set_own_id(my_id);
-    if (bridge::on()) bridge::start();
     log_line("rise-pc-netlog: logging Steam networking (> sent, < received; peer is the Steam ID, or the connection)\n");
     if (MH_Initialize() != MH_OK) {
         log_line("MinHook didn't start: nothing will be logged\n");
@@ -660,7 +433,6 @@ void start() {
     }
     // Already loaded before us?
     for (const wchar_t* n : {L"steamclient64.dll", L"OnlineFix64.dll"}) check_module(GetModuleHandleW(n));
-    for (const wchar_t* n : {L"steam_api64.dll", L"OnlineFix64.dll"}) check_flat(GetModuleHandleW(n));
 }
 
 }  // namespace

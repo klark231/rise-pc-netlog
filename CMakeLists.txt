@@ -22,7 +22,7 @@ add_library(minhook STATIC
     ${minhook_SOURCE_DIR}/src/hde/hde64.c)
 target_include_directories(minhook PUBLIC ${minhook_SOURCE_DIR}/include)
 
-add_library(dinput8 SHARED src/netlog.cpp src/bridge.cpp src/exports.def)
-target_link_libraries(dinput8 PRIVATE minhook ws2_32)
+add_library(dinput8 SHARED src/netlog.cpp src/exports.def)
+target_link_libraries(dinput8 PRIVATE minhook)
 target_compile_definitions(dinput8 PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
 set_target_properties(dinput8 PROPERTIES OUTPUT_NAME dinput8)
