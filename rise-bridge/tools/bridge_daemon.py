@@ -83,6 +83,23 @@ class Daemon:
         if fixed != payload:
             self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01)")
             payload = fixed
+
+        # --- PATCH: Intercept Switch's 8-byte reply and convert to 16-byte PC format ---
+        if len(payload) == 8:
+            self.log("[Bridge] Intercepted 8-byte Switch reply. Converting to 16-byte PC reply...")
+            # Use the Switch host's identity
+            identity = b'\x4f\x28\x18\xb9'
+            
+            new_payload = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
+            new_payload += struct.pack("<I", 16)        # Length: 16
+            new_payload += identity                     # Identity (4 bytes)
+            checksum = zlib.crc32(new_payload) & 0xFFFFFFFF
+            new_payload += struct.pack("<I", checksum)  # Checksum
+            
+            self.log("[Bridge] Sent 16-byte reply to PC: " + new_payload.hex())
+            payload = new_payload
+        # ---------------------------------------------------------------------------------
+
         self.reply("RECV " + joinmsgs.steam_wrap(payload).hex())
 
     def to_switch(self, data: bytes) -> None:
@@ -101,22 +118,20 @@ class Daemon:
             
         host, host_mac = st._host()
         if host:
-            # --- PATCH: Intercept 36-byte PC message and send BOTH packets to break the loop ---
+            # --- PATCH: Intercept 36-byte PC message and convert to 16-byte Switch format ---
             if len(game) == 36:
-                self.log("[Bridge] Intercepted 36-byte PC message. Sending BOTH original and 16-byte packet...")
-                # Build the 16-byte packet the Switch expects
-                new_game = struct.pack("<I", 0x02030100) + struct.pack("<I", 16) + b'\x4f\x28\x18\xb9'
+                self.log("[Bridge] Intercepted 36-byte PC message. Converting to 16-byte...")
+                # Use the Switch host's identity
+                identity = b'\x4f\x28\x18\xb9'
+                
+                new_game = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
+                new_game += struct.pack("<I", 16)        # Length: 16
+                new_game += identity                     # Identity (4 bytes)
                 checksum = zlib.crc32(new_game) & 0xFFFFFFFF
-                new_game += struct.pack("<I", checksum)
+                new_game += struct.pack("<I", checksum)  # Checksum
                 
-                # 1. Send the original 36-byte packet (so the PC gets a response it understands)
-                fixed_orig = gamemsg.to_switch(game)
-                st.send_game(host, fixed_orig)
-                
-                # 2. Send the new 16-byte packet (so the Switch actually accepts the join)
-                fixed_new = gamemsg.to_switch(new_game)
-                st.send_game(host, fixed_new)
-                return
+                self.log("[Bridge] Sent 16-byte packet to Switch: " + new_game.hex())
+                game = new_game
             # ---------------------------------------------------------------------------------
             
             if self.hello_map and host_mac and hellomap.is_hello(game):
