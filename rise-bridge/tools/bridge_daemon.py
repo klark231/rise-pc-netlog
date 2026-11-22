@@ -79,28 +79,6 @@ class Daemon:
 
     def from_switch(self, addr: int, payload: bytes) -> None:
         self.log("Switch host -> game: %d bytes" % len(payload))
-        
-        # --- PATCH: Intercept the 36-byte join reply ---
-        if len(payload) == 36:
-            self.log("[Bridge] Intercepted 36-byte reply. Rewriting for PC...")
-            
-            # Extract the 4-byte identity. 
-            # If the PC still fails to join, try payload[4:8] or payload[12:16]
-            identity = payload[8:12] 
-            
-            # Build the 16-byte packet the PC expects (Type 0x02030100)
-            new_payload = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
-            new_payload += struct.pack("<I", 16)        # Length: 16
-            new_payload += identity                     # Identity (4 bytes)
-            
-            # Calculate the CRC32 checksum
-            checksum = zlib.crc32(new_payload) & 0xFFFFFFFF
-            new_payload += struct.pack("<I", checksum)  # Append checksum
-            
-            self.log("[Bridge] Sent 16-byte packet: " + new_payload.hex())
-            payload = new_payload
-        # -----------------------------------------------
-        
         fixed = gamemsg.to_pc(payload)
         if fixed != payload:
             self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01)")
@@ -114,14 +92,12 @@ class Daemon:
             return
         game = joinmsgs.steam_unwrap(data)
         
-        # --- PATCH: Intercept the 36-byte PC message and convert to 16-byte Switch format ---
+        # --- PATCH: Intercept 36-byte PC message and convert to 16-byte Switch format ---
         if game is not None and len(game) == 36:
             self.log("[Bridge] Intercepted 36-byte PC message. Converting to 16-byte...")
-            
             # Use the Switch's session ID as the identity
             identity = b'\x4f\x28\x18\xb9'
             
-            # Build the 16-byte packet the Switch expects
             new_game = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
             new_game += struct.pack("<I", 16)        # Length: 16
             new_game += identity                     # Identity (4 bytes)
@@ -130,32 +106,9 @@ class Daemon:
             
             self.log("[Bridge] Sent 16-byte packet to Switch: " + new_game.hex())
             game = new_game
-        # -------------------------------------------------------------------------------------
+        # ---------------------------------------------------------------------------------
         
-        if game is not None:
-            self.link.send(game)
-        
-        
-        # --- PATCH: Intercept the 36-byte PC message and convert to 16-byte Switch format ---
-        if game is not None and len(game) == 36:
-            self.log("[Bridge] Intercepted 36-byte PC message. Converting to 16-byte...")
-            
-            # Extract identity. If the session key is available in self.link, use it.
-            # Otherwise, we use a default 4-byte identity (e.g., 01 01 01 01).
-            identity = getattr(self.link, 'key', b'\x01\x01\x01\x01')[:4]
-            
-            # Build the 16-byte packet the Switch expects
-            new_game = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
-            new_game += struct.pack("<I", 16)        # Length: 16
-            new_game += identity                     # Identity (4 bytes)
-            checksum = zlib.crc32(new_game) & 0xFFFFFFFF
-            new_game += struct.pack("<I", checksum)  # Checksum
-            
-            self.log("[Bridge] Sent 16-byte packet to Switch: " + new_game.hex())
-            game = new_game
-        # -------------------------------------------------------------------------------------
-        
-        self.log("game -> Switch host: %d bytes%s" % (len(data), "" if game is not None else " (not a game message, dropped)"))
+        self.log("game -> Switch host: %d bytes%s" % (len(game) if game else 0, "" if game is not None else " (not a game message, dropped)"))
         st = self.station
         if game is None or st is None or st.state != "in":
             return
