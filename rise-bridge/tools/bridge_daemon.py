@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""The PC side's helper: the game's DLL talks to this over UDP on 127.0.0.1; this talks to the hub server and the Switch
-session (a Pia bridge station), so the DLL doesn't need its own crypto or hub code.
-
-  python3 tools/bridge_daemon.py SERVER[:PORT] [--key MATCHMAKING_KEY] [--name NAME] [--listen 39600]
-
-One text line per datagram (hex is lower case, no spaces):
-  DLL -> here:  LIST                 list the server's hubs
-                JOIN <index>         join hub <index> of the last list as a Pia station
-                SEND <hex>           a Steam message from the game to the Switch host (SteamConReq is answered here)
-                LEAVE
-  here -> DLL:  HUBS\\nH <index> <hex of name, UTF-8> <players> <base64 of the advertise data from byte 0x10>\\n...
-                JOINED | ERR <text> | RECV <hex> (a Steam message for the game) | LEFT
-"""
 import argparse, base64, os, socket, struct, sys, threading, time, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from bridge import gamemsg, hellomap, hublink, joinmsgs
@@ -19,18 +6,18 @@ from bridge.station import Station
 
 CON_REQ, CON_ANS = b"SteamConReq\x00", b"SteamConAns\x00"
 
-
 class Daemon:
     def __init__(self, server, room, name, port, log=print):
         self.server, self.room, self.name, self.log = server, room, name, log
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("127.0.0.1", port))
-        self.dll = None            # where the DLL's datagrams come from (replies go there)
+        self.dll = None
         self.hubs = []
         self.link = self.station = None
+        self.pc_handshake = None  # Store the PC's original 36-byte packet
         here = os.path.dirname(os.path.abspath(__file__))
         self.hello_map = hellomap.find(os.getcwd(), os.path.join(here, ".."), here, os.path.dirname(os.path.abspath(sys.argv[0])))
-        self.log("hello map: %s" % ("loaded" if self.hello_map else "none (the host won't answer the game's hello; run tools/hello_probe.py)"))
+        self.log("hello map: %s" % ("loaded" if self.hello_map else "none"))
 
     def reply(self, text: str) -> None:
         if self.dll:
@@ -47,12 +34,10 @@ class Daemon:
         return "\n".join(out)
 
     def join(self, index: int) -> None:
-        """Join hub <index>. The first try sometimes isn't taken (seen once in a real run: 22 s of nothing, then the next
-        try worked in 3 s), so give each try 8 s and make up to 3."""
         try:
             hid = self.hubs[index][0]
             import hashlib
-            mac = bytes([0x02]) + hashlib.sha1(self.name.encode()).digest()[:5]   # the same station identity every time
+            mac = bytes([0x02]) + hashlib.sha1(self.name.encode()).digest()[:5]
             state = "?"
             for attempt in range(1, 4):
                 link = hublink.Link(mac, self.name, bridge=True)
@@ -62,18 +47,18 @@ class Daemon:
                 st.on_leave = lambda addr: self.reply("LEFT")
                 st.start()
                 self.link, self.station = link, st
-                for _ in range(80):                # 8 s for the host to take us in
+                for _ in range(80):
                     if st.state == "in":
                         self.reply("JOINED")
                         return
                     time.sleep(0.1)
                 state = st.state
-                self.log("join try %d: the host didn't take us in (state %s)%s" % (attempt, state, "; trying again" if attempt < 3 else ""))
+                self.log("join try %d: state %s" % (attempt, state))
                 link.leave()
                 self.link = self.station = None
                 time.sleep(1.0)
             self.reply("ERR the host didn't take us in (state %s)" % state)
-        except Exception as e:                 # the DLL shows nothing of this: log it here and tell it
+        except Exception as e:
             self.log("join failed: %s" % e)
             self.reply("ERR %s" % e)
 
@@ -84,15 +69,23 @@ class Daemon:
             self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01)")
             payload = fixed
 
-        # --- PATCH: Intercept Switch's 8-byte reply and convert to 16-byte PC format ---
+        # --- PATCH: Intercept Switch's 8-byte reply and convert to 36-byte PC format ---
         if len(payload) == 8:
-            self.log("[Bridge] Intercepted 8-byte Switch reply. Converting to 16-byte PC reply...")
-            identity = b'\x4f\x28\x18\xb9'
-            new_payload = struct.pack("<I", 0x02030100) + struct.pack("<I", 16) + identity
-            checksum = zlib.crc32(new_payload) & 0xFFFFFFFF
-            new_payload += struct.pack("<I", checksum)
-            self.log("[Bridge] Sent 16-byte reply to PC: " + new_payload.hex())
-            payload = new_payload
+            self.log("[Bridge] Intercepted 8-byte Switch reply. Converting to 36-byte PC reply...")
+            if getattr(self, 'pc_handshake', None):
+                try:
+                    body = gamemsg.data_of(self.pc_handshake)
+                    # The PC expects a 36-byte packet. We use its own handshake body and set platform to 0x01.
+                    new_body = body[:3] + b'\x01' + body[4:]
+                    new_payload = gamemsg.seal(new_body)
+                    self.log("[Bridge] Sent 36-byte reply to PC: " + new_payload.hex())
+                    payload = new_payload
+                except Exception as e:
+                    self.log("[Bridge] Could not reseal PC packet: %s" % e)
+                    return
+            else:
+                self.log("[Bridge] No stored PC handshake to reply with!")
+                return
         # ---------------------------------------------------------------------------------
 
         self.reply("RECV " + joinmsgs.steam_wrap(payload).hex())
@@ -100,28 +93,27 @@ class Daemon:
     def to_switch(self, data: bytes) -> None:
         if data.startswith(b"SteamCon"):
             if data == CON_REQ:
-                self.reply("RECV " + CON_ANS.hex())     # answered here, as the notes say the host would
+                self.reply("RECV " + CON_ANS.hex())
             return
             
         game = joinmsgs.steam_unwrap(data)
+        self.log("game -> Switch host: %d bytes" % (len(game) if game else 0))
         
-        self.log("game -> Switch host: %d bytes%s" % (len(game) if game else 0, "" if game is not None else " (not a game message, dropped)"))
-        
-        # --- PATCH: Use Claude's perfect checksum to translate the handshake ---
         if game is not None:
+            # Store the 36-byte handshake so we can use it to reply to the PC later
+            if len(game) == 36:
+                self.pc_handshake = game
+                self.log("[Bridge] Stored 36-byte PC handshake.")
+            
             try:
                 body = gamemsg.data_of(game)
-                # If it's a join handshake (starts with 01 03 01)
                 if body.startswith(b'\x01\x03\x01'):
                     self.log("[Bridge] Intercepted handshake. Changing platform to Switch (0x20)...")
-                    # Keep the first 3 bytes (01 03 01), change the 4th byte (platform) to 0x20, keep the rest (nonce)
                     new_body = body[:3] + b'\x20' + body[4:]
-                    # Seal it using Claude's generated table
                     game = gamemsg.seal(new_body)
                     self.log("[Bridge] Resealed for Switch: " + game.hex())
             except Exception as e:
                 self.log("[Bridge] Could not reseal: %s" % e)
-        # ------------------------------------------------------------------------
         
         st = self.station
         if game is None or st is None or st.state != "in":
@@ -130,11 +122,9 @@ class Daemon:
         host, host_mac = st._host()
         if host:
             if self.hello_map and host_mac and hellomap.is_hello(game):
-                game = self.hello_map.message_for(host_mac)   # the hello for THIS host's MAC, not the one for the fake host
-                self.log("the game's hello replaced with the one host %s expects" % host_mac.hex(":"))
+                game = self.hello_map.message_for(host_mac)
             fixed = gamemsg.to_switch(game)
             if fixed != game:
-                self.log("the game's platform message made the way a Switch sends it (0x01 -> 0x20)")
                 game = fixed
             st.send_game(host, game)
 
@@ -168,7 +158,6 @@ class Daemon:
             except Exception as e:
                 self.log("bad datagram %r: %s" % (data[:40], e))
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("server")
@@ -178,7 +167,6 @@ def main():
     a = ap.parse_args()
     host, _, port = a.server.partition(":")
     Daemon((host, int(port or 39510)), hublink.room_of_key(a.key), a.name, a.listen).run()
-
 
 if __name__ == "__main__":
     main()
