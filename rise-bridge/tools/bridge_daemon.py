@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse, base64, os, socket, struct, sys, threading, time, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from bridge import gamemsg, hellomap, hublink, joinmsgs
+from bridge import gamemsg, hellomap, hublink, joinmsgs, memberid
 from bridge.station import Station
 
 CON_REQ, CON_ANS = b"SteamConReq\x00", b"SteamConAns\x00"
@@ -62,6 +62,23 @@ class Daemon:
             self.log("join failed: %s" % e)
             self.reply("ERR %s" % e)
 
+    def member_reply(self, host: int, payload: bytes) -> None:
+        """The host sent its 0203 member message: answer it the way a Switch joiner does (its own 0203, then the 0302 reply),
+        built from the two identities that message carries (bridge/memberid.py). Repeated every 2 s while the host
+        keeps asking, up to 10 times."""
+        ids = memberid.learn(payload)
+        st = self.station
+        if not ids or st is None or st.state != "in":
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_member_t", 0) < 2.0 or getattr(self, "_member_n", 0) >= 10:
+            return
+        self._member_t, self._member_n = now, getattr(self, "_member_n", 0) + 1
+        id_host, id_me = ids
+        self.log("[member] host id %s, our id %s: sending the 0203 and 0302 replies (try %d)" % (id_host.hex(), id_me.hex(), self._member_n))
+        st.send_game(host, memberid.member_msg(id_me, id_host))
+        st.send_game(host, memberid.reply_msg(id_me, id_host))
+
     def from_switch(self, addr: int, payload: bytes) -> None:
         self.log("Switch host -> game: %d bytes" % len(payload))
         fixed = gamemsg.to_pc(payload)
@@ -69,24 +86,7 @@ class Daemon:
             self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01)")
             payload = fixed
 
-        # --- PATCH: Intercept Switch's 8-byte reply and convert to 36-byte PC format ---
-        if len(payload) == 8:
-            self.log("[Bridge] Intercepted 8-byte Switch reply. Converting to 36-byte PC reply...")
-            if getattr(self, 'pc_handshake', None):
-                try:
-                    body = gamemsg.data_of(self.pc_handshake)
-                    # The PC expects a 36-byte packet. We use its own handshake body and set platform to 0x01.
-                    new_body = body[:3] + b'\x01' + body[4:]
-                    new_payload = gamemsg.seal(new_body)
-                    self.log("[Bridge] Sent 36-byte reply to PC: " + new_payload.hex())
-                    payload = new_payload
-                except Exception as e:
-                    self.log("[Bridge] Could not reseal PC packet: %s" % e)
-                    return
-            else:
-                self.log("[Bridge] No stored PC handshake to reply with!")
-                return
-        # ---------------------------------------------------------------------------------
+        self.member_reply(addr, payload)
 
         self.reply("RECV " + joinmsgs.steam_wrap(payload).hex())
 
@@ -99,22 +99,12 @@ class Daemon:
         game = joinmsgs.steam_unwrap(data)
         self.log("game -> Switch host: %d bytes" % (len(game) if game else 0))
         
-        if game is not None:
-            # Store the 36-byte handshake so we can use it to reply to the PC later
-            if len(game) == 36:
-                self.pc_handshake = game
-                self.log("[Bridge] Stored 36-byte PC handshake.")
-            
-            try:
-                body = gamemsg.data_of(game)
-                if body.startswith(b'\x01\x03\x01'):
-                    self.log("[Bridge] Intercepted handshake. Changing platform to Switch (0x20)...")
-                    new_body = body[:3] + b'\x20' + body[4:]
-                    game = gamemsg.seal(new_body)
-                    self.log("[Bridge] Resealed for Switch: " + game.hex())
-            except Exception as e:
-                self.log("[Bridge] Could not reseal: %s" % e)
-        
+        if game is not None and len(game) >= 8 and gamemsg.data_of(game)[:2] == memberid.T_REPLY:
+            # The PC game's own 0302 reply is 36 bytes (a Switch joiner's is 16) and carries the PC's identity: the host
+            # never accepted it. The helper sends the Switch-style one itself (member_reply), so this one is dropped.
+            self.log("game's own 0302 reply (%d bytes) not forwarded; the helper answers the host itself" % len(game))
+            return
+
         st = self.station
         if game is None or st is None or st.state != "in":
             return
