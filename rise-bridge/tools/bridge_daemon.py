@@ -87,15 +87,10 @@ class Daemon:
         # --- PATCH: Intercept Switch's 8-byte reply and convert to 16-byte PC format ---
         if len(payload) == 8:
             self.log("[Bridge] Intercepted 8-byte Switch reply. Converting to 16-byte PC reply...")
-            # Use the Switch host's identity
             identity = b'\x4f\x28\x18\xb9'
-            
-            new_payload = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
-            new_payload += struct.pack("<I", 16)        # Length: 16
-            new_payload += identity                     # Identity (4 bytes)
+            new_payload = struct.pack("<I", 0x02030100) + struct.pack("<I", 16) + identity
             checksum = zlib.crc32(new_payload) & 0xFFFFFFFF
-            new_payload += struct.pack("<I", checksum)  # Checksum
-            
+            new_payload += struct.pack("<I", checksum)
             self.log("[Bridge] Sent 16-byte reply to PC: " + new_payload.hex())
             payload = new_payload
         # ---------------------------------------------------------------------------------
@@ -112,28 +107,28 @@ class Daemon:
         
         self.log("game -> Switch host: %d bytes%s" % (len(game) if game else 0, "" if game is not None else " (not a game message, dropped)"))
         
+        # --- PATCH: Use Claude's perfect checksum to translate the handshake ---
+        if game is not None:
+            try:
+                body = gamemsg.data_of(game)
+                # If it's a join handshake (starts with 01 03 01)
+                if body.startswith(b'\x01\x03\x01'):
+                    self.log("[Bridge] Intercepted handshake. Changing platform to Switch (0x20)...")
+                    # Keep the first 3 bytes (01 03 01), change the 4th byte (platform) to 0x20, keep the rest (nonce)
+                    new_body = body[:3] + b'\x20' + body[4:]
+                    # Seal it using Claude's generated table
+                    game = gamemsg.seal(new_body)
+                    self.log("[Bridge] Resealed for Switch: " + game.hex())
+            except Exception as e:
+                self.log("[Bridge] Could not reseal: %s" % e)
+        # ------------------------------------------------------------------------
+        
         st = self.station
         if game is None or st is None or st.state != "in":
             return
             
         host, host_mac = st._host()
         if host:
-            # --- PATCH: Intercept 36-byte PC message and convert to 16-byte Switch format ---
-            if len(game) == 36:
-                self.log("[Bridge] Intercepted 36-byte PC message. Converting to 16-byte...")
-                # Use the Switch host's identity
-                identity = b'\x4f\x28\x18\xb9'
-                
-                new_game = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
-                new_game += struct.pack("<I", 16)        # Length: 16
-                new_game += identity                     # Identity (4 bytes)
-                checksum = zlib.crc32(new_game) & 0xFFFFFFFF
-                new_game += struct.pack("<I", checksum)  # Checksum
-                
-                self.log("[Bridge] Sent 16-byte packet to Switch: " + new_game.hex())
-                game = new_game
-            # ---------------------------------------------------------------------------------
-            
             if self.hello_map and host_mac and hellomap.is_hello(game):
                 game = self.hello_map.message_for(host_mac)   # the hello for THIS host's MAC, not the one for the fake host
                 self.log("the game's hello replaced with the one host %s expects" % host_mac.hex(":"))

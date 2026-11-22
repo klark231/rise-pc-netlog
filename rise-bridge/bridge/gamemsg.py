@@ -54,3 +54,23 @@ def to_switch(msg: bytes) -> bytes:
     if is_platform_msg(msg) and parse(msg)[1][4] != 0x20:
         return set_byte(msg, 4, 0x20)
     return msg
+
+# ---- the full checksum, from bridge/headertable.py (solved from captures) -------------------------------------------
+def seal(data: bytes) -> bytes:
+    """A complete game message for these data bytes (the plain body AFTER the XOR byte): header + data XOR key."""
+    from .headertable import C, D
+    total = 4 + len(data)
+    if len(data) > len(D) // 8:
+        raise KeyError("data longer than %d bytes" % (len(D) // 8))
+    header, n = C[total], 0
+    for byte in reversed(data):
+        for i in range(8):
+            if byte >> i & 1:
+                header ^= D[n]
+            n += 1
+    h = header.to_bytes(4, "big")
+    return h + bytes(b ^ h[3] for b in data)
+
+def data_of(msg: bytes) -> bytes:
+    """The data bytes (plain body after the XOR byte) of a game message"""
+    return bytes(b ^ msg[3] for b in msg[4:])
