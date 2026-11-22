@@ -12,7 +12,7 @@ One text line per datagram (hex is lower case, no spaces):
   here -> DLL:  HUBS\\nH <index> <hex of name, UTF-8> <players> <base64 of the advertise data from byte 0x10>\\n...
                 JOINED | ERR <text> | RECV <hex> (a Steam message for the game) | LEFT
 """
-import argparse, base64, os, socket, sys, threading, time
+import argparse, base64, os, socket, struct, sys, threading, time, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from bridge import gamemsg, hellomap, hublink, joinmsgs
 from bridge.station import Station
@@ -79,6 +79,28 @@ class Daemon:
 
     def from_switch(self, addr: int, payload: bytes) -> None:
         self.log("Switch host -> game: %d bytes" % len(payload))
+        
+        # --- PATCH: Intercept the 36-byte join reply ---
+        if len(payload) == 36:
+            self.log("[Bridge] Intercepted 36-byte reply. Rewriting for PC...")
+            
+            # Extract the 4-byte identity. 
+            # If the PC still fails to join, try payload[4:8] or payload[12:16]
+            identity = payload[8:12] 
+            
+            # Build the 16-byte packet the PC expects (Type 0x02030100)
+            new_payload = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
+            new_payload += struct.pack("<I", 16)        # Length: 16
+            new_payload += identity                     # Identity (4 bytes)
+            
+            # Calculate the CRC32 checksum
+            checksum = zlib.crc32(new_payload) & 0xFFFFFFFF
+            new_payload += struct.pack("<I", checksum)  # Append checksum
+            
+            self.log("[Bridge] Sent 16-byte packet: " + new_payload.hex())
+            payload = new_payload
+        # -----------------------------------------------
+        
         fixed = gamemsg.to_pc(payload)
         if fixed != payload:
             self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01)")
