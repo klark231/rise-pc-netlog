@@ -71,7 +71,8 @@ class Daemon:
         if not ids or st is None or st.state != "in":
             return
         now = time.monotonic()
-        if now - getattr(self, "_member_t", 0) < 2.0 or getattr(self, "_member_n", 0) >= 10:
+        last = getattr(self, "_member_t", None)
+        if (last is not None and now - last < 2.0) or getattr(self, "_member_n", 0) >= 10:
             return
         self._member_t, self._member_n = now, getattr(self, "_member_n", 0) + 1
         id_host, id_me = ids

@@ -239,7 +239,21 @@ def run_gui():
 
     cfg = load_config()
     q = queue.Queue()
-    log = lambda s: q.put("%s  %s" % (time.strftime("%H:%M:%S"), s))
+    log_path = os.path.join(APP_DIR, "rise_bridge_log.txt")     # the same lines, to send back after a run (overwritten at each start)
+    try:
+        open(log_path, "w").close()
+    except OSError:
+        log_path = None
+
+    def log(s):
+        line = "%s  %s" % (time.strftime("%H:%M:%S"), s)
+        q.put(line)
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
     root = tk.Tk()
     root.title("Rise Bridge")
     root.geometry("640x520")
