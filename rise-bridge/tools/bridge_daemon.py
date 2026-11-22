@@ -90,6 +90,7 @@ class Daemon:
             if data == CON_REQ:
                 self.reply("RECV " + CON_ANS.hex())     # answered here, as the notes say the host would
             return
+            
         game = joinmsgs.steam_unwrap(data)
         
         # --- PATCH: Intercept 36-byte PC message and convert to 16-byte Switch format ---
@@ -109,9 +110,11 @@ class Daemon:
         # ---------------------------------------------------------------------------------
         
         self.log("game -> Switch host: %d bytes%s" % (len(game) if game else 0, "" if game is not None else " (not a game message, dropped)"))
+        
         st = self.station
         if game is None or st is None or st.state != "in":
             return
+            
         host, host_mac = st._host()
         if host:
             if self.hello_map and host_mac and hellomap.is_hello(game):
