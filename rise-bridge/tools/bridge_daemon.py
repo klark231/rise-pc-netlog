@@ -47,23 +47,32 @@ class Daemon:
         return "\n".join(out)
 
     def join(self, index: int) -> None:
+        """Join hub <index>. The first try sometimes isn't taken (seen once in a real run: 22 s of nothing, then the next
+        try worked in 3 s), so give each try 8 s and make up to 3."""
         try:
             hid = self.hubs[index][0]
             import hashlib
             mac = bytes([0x02]) + hashlib.sha1(self.name.encode()).digest()[:5]   # the same station identity every time
-            link = hublink.Link(mac, self.name, bridge=True)
-            link.join(self.server, hid, self.room)
-            st = Station(link, log=self.log)
-            st.on_game = self.from_switch
-            st.on_leave = lambda addr: self.reply("LEFT")
-            st.start()
-            self.link, self.station = link, st
-            for _ in range(200):               # up to 20 s for the host to take us in
-                if st.state == "in":
-                    self.reply("JOINED")
-                    return
-                time.sleep(0.1)
-            self.reply("ERR the host didn't take us in (state %s)" % st.state)
+            state = "?"
+            for attempt in range(1, 4):
+                link = hublink.Link(mac, self.name, bridge=True)
+                link.join(self.server, hid, self.room)
+                st = Station(link, log=self.log)
+                st.on_game = self.from_switch
+                st.on_leave = lambda addr: self.reply("LEFT")
+                st.start()
+                self.link, self.station = link, st
+                for _ in range(80):                # 8 s for the host to take us in
+                    if st.state == "in":
+                        self.reply("JOINED")
+                        return
+                    time.sleep(0.1)
+                state = st.state
+                self.log("join try %d: the host didn't take us in (state %s)%s" % (attempt, state, "; trying again" if attempt < 3 else ""))
+                link.leave()
+                self.link = self.station = None
+                time.sleep(1.0)
+            self.reply("ERR the host didn't take us in (state %s)" % state)
         except Exception as e:                 # the DLL shows nothing of this: log it here and tell it
             self.log("join failed: %s" % e)
             self.reply("ERR %s" % e)
