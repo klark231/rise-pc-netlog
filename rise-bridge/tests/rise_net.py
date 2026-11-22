@@ -187,9 +187,9 @@ class Pia:
         return bytes(out)
 
 
-def pia_messages(pt):
+def _pia_messages(pt, out):
     """A decrypted Pia body's messages: a field mask, then the fields it names (the rest as in the one before)"""
-    i, prev, out = 0, {'flags': 0, 'size': 0, 'ptype': 0, 'port': 0, 'dst': 0}, []
+    i, prev = 0, {'flags': 0, 'size': 0, 'ptype': 0, 'port': 0, 'dst': 0}
     while i < len(pt):
         mask = pt[i]
         i += 1
@@ -208,6 +208,14 @@ def pia_messages(pt):
         i = (i + m['size'] + 3) & ~3
         out.append(m)
         prev = m
+
+
+def pia_messages(pt):
+    out = []
+    try:
+        _pia_messages(pt, out)
+    except (struct.error, IndexError):
+        pass  # trailing padding or a truncated tail: keep the messages parsed so far
     return out
 
 
@@ -215,12 +223,40 @@ PIA_TYPES = {0x08: 'leave', 0x14: 'connect', 0x18: 'session', 0x1c: 'clock', 0x2
              0x68: 'game'}
 
 
+def read_switch_all(path):
+    """Every key, advertise-data session id and player/MAC table in a capture that holds several sessions"""
+    text = open(path, encoding='utf-8', errors='replace').read()
+    keys = list(dict.fromkeys(bytes.fromhex(k) for k in re.findall(r'# AES key ([0-9a-f]{32}) ', text)))
+    sessions = list(dict.fromkeys(bytes.fromhex(a.replace(' ', ''))
+                                  for a in re.findall(r'# advertise data[^\n]*\n#\s+0000  ((?:[0-9a-f]{2} ){4})', text)))
+    tables, cur = [], {}
+    for line in text.split('\n'):
+        m = re.match(r'# player \d+: (\S+) mac (\S+)', line)
+        if m:
+            cur[m[1]] = bytes.fromhex(m[2].replace(':', ''))
+        elif cur:
+            if cur not in tables:
+                tables.append(cur)
+            cur = {}
+    if cur and cur not in tables:
+        tables.append(cur)
+    return keys, sessions, tables, read_switch(path)[3]
+
+
 def switch_messages(path):
-    key, macs, session, packets = read_switch(path)
-    if not key or session is None:
+    keys, sessions, tables, packets = read_switch_all(path)
+    if not keys or not sessions:
         sys.exit('no Pia key or advertise data in %s (an older capture?)' % path)
-    pia = Pia(key, macs, session)
+    combos = [Pia(k, t, s) for k in keys for s in sessions for t in tables]
+    last = None
     for pk in packets:
+        pia = None
+        for c in ([last] if last else []) + combos:
+            if c.verify(pk):
+                pia = last = c
+                break
+        if pia is None:
+            continue
         pt = pia.decrypt(pk)
         if pt is None:
             continue
