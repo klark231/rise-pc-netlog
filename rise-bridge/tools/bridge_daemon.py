@@ -118,6 +118,28 @@ class Daemon:
         if game is not None and len(game) == 36:
             self.log("[Bridge] Intercepted 36-byte PC message. Converting to 16-byte...")
             
+            # Use the Switch's session ID as the identity
+            identity = b'\x4f\x28\x18\xb9'
+            
+            # Build the 16-byte packet the Switch expects
+            new_game = struct.pack("<I", 0x02030100) # Type: 00 01 03 02
+            new_game += struct.pack("<I", 16)        # Length: 16
+            new_game += identity                     # Identity (4 bytes)
+            checksum = zlib.crc32(new_game) & 0xFFFFFFFF
+            new_game += struct.pack("<I", checksum)  # Checksum
+            
+            self.log("[Bridge] Sent 16-byte packet to Switch: " + new_game.hex())
+            game = new_game
+        # -------------------------------------------------------------------------------------
+        
+        if game is not None:
+            self.link.send(game)
+        
+        
+        # --- PATCH: Intercept the 36-byte PC message and convert to 16-byte Switch format ---
+        if game is not None and len(game) == 36:
+            self.log("[Bridge] Intercepted 36-byte PC message. Converting to 16-byte...")
+            
             # Extract identity. If the session key is available in self.link, use it.
             # Otherwise, we use a default 4-byte identity (e.g., 01 01 01 01).
             identity = getattr(self.link, 'key', b'\x01\x01\x01\x01')[:4]
