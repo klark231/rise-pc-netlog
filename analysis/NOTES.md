@@ -230,3 +230,40 @@ the Switch has `00 04 00 00` and no name: that second block is the platform acco
 in front (session ID, zeros, `08 10 00 00`, then 4 bytes) change with every room, so the Switch's advertise data
 carries nothing like PC's `SearchKey6` network version; if the two have a version check, it's in the join messages.
 
+## 6. The Switch join decrypted, and the PC-only messages (port capture of Nov 24, two rooms)
+
+`rise_net.py` now takes a capture with several networks (each with its own key and session ID): it tries every key
+and session ID and remembers which one each sender's packets verify with. All but one of the 9929 packets verify. The
+join messages are as in section 3.
+
+**A second layer in the game's messages.** After the XOR byte is taken off, each byte from the second on is still
+XORed with the one before it (`unchain` in `rise_net.py`). With both layers off, the messages read plainly: small
+counters, lengths and IDs.
+
+**The first messages after joining, side by side** (kind, size):
+
+| PC | Switch | |
+|---|---|---|
+| `01 03`, 15 | `01 03`, 15 | the same on both |
+| `01 03`, 12 | `01 03`, 12 | the same |
+| `01 03`, 9 (`00 01 01`) | `01 03`, 9 | the same |
+| `03 02`, 36 | — | **PC only**: carries the sender's Steam ID |
+| `02 03`, 21 (`… 00 00 00 01 00 01 01`) | `02 03`, 21 | the same |
+| `01 03`, 8 | `01 03`, 8 | the same |
+| `03 02` / `02 03`, 16 and 24 | `03 02` / `02 03`, 16 | counters, on both |
+| `03 02`, 309 / 275 | — | **PC only**: the Steam auth ticket |
+| `04 06`, ~480 | `04 06`, ~440–460 | each player's data |
+
+The 275/309-byte message, both layers off: a header, the sender's Steam ID, `ea 00 ea` (234, twice), then the
+234-byte ticket (it starts `14 00 00 00`, as Steam's tickets do). The 36-byte one holds the Steam ID too. Nothing like
+either goes between Switch players.
+
+So the bridge's job at join time is clear:
+- PC → Switch: drop the `03 02` messages that carry a Steam ID or a ticket.
+- Switch → PC: make up both for each Switch player (an ID the PC-side DLL hands out, a dummy 234-byte ticket), and
+  have the DLL's `BeginAuthSession` accept bridged players.
+- Everything else at join time passes through as it is.
+
+Still to do: line up the `04 06` player data (PC's pieces run 30–40 bytes longer, probably the account fields), and
+what the PC sends in a quest that the Switch doesn't.
+

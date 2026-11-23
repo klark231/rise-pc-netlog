@@ -72,6 +72,11 @@ def unscramble(msg):
     return msg[:3], bytes(b ^ msg[3] for b in msg[3:])
 
 
+def unchain(body):
+    """A body's second layer off: from its second byte on, each byte is XORed with the one before it"""
+    return bytes(body[:1]) + bytes(body[i] ^ body[i - 1] for i in range(1, len(body)))
+
+
 def short_id(s):
     """A Steam ID or lobby shortened to its last 4 digits, so a log can be shared"""
     return '…' + s[-4:] if s.isdigit() and len(s) > 8 else s
@@ -123,8 +128,9 @@ def read_switch(path):
     text = open(path, encoding='utf-8', errors='replace').read()
     keys = re.findall(r'# AES key ([0-9a-f]{32}) \(16 bytes, mode 1, from main\+0x24d9', text)
     macs = {ip: bytes.fromhex(mac.replace(':', '')) for ip, mac in re.findall(r'# player \d+: (\S+) mac (\S+)', text)}
-    adv = re.search(r'# advertise data[^\n]*\n#\s+0000  ((?:[0-9a-f]{2} ){4})', text)
-    session = bytes.fromhex(adv[1].replace(' ', '')) if adv else None
+    # (a capture can hold several networks, each with its own key and session ID: every one is tried, see Pia)
+    sessions = list(dict.fromkeys(bytes.fromhex(a.replace(' ', ''))
+                                  for a in re.findall(r'# advertise data[^\n]*\n#\s+0000  ((?:[0-9a-f]{2} ){4})', text)))
     packets, cur = [], None
     for line in text.split('\n'):
         m = SW_PACKET.match(line)
@@ -137,38 +143,58 @@ def read_switch(path):
             cur['data'] += bytes.fromhex(m[1].replace(' ', ''))
         elif line.startswith('#') or not line.strip():
             cur = None
-    return (bytes.fromhex(keys[-1]) if keys else None), macs, session, packets
+    return list(dict.fromkeys(bytes.fromhex(k) for k in keys)), macs, sessions, packets
 
 
 class Pia:
-    def __init__(self, key, macs, session):
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        self.ecb = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
-        self.key, self.macs, self.session = key, macs, session
+    """Every key and session ID of the capture; for each sender, the pair its packets verify with is remembered"""
 
-    def nonce(self, pk):
+    def __init__(self, keys, macs, sessions):
+        self.keys, self.macs, self.sessions = keys, macs, sessions
+        self.pair = {}  # sender -> (key, session)
+
+    def nonce(self, pk, session):
         d = bytes(pk['data'])
         mac = self.macs.get(pk['src'])
         if mac is None:
             return None
-        return struct.pack('>I', zlib.crc32(self.session + mac))[:3] + bytes([d[0x0c]]) + d[0x10:0x18]
+        return struct.pack('>I', zlib.crc32(session + mac))[:3] + bytes([d[0x0c]]) + d[0x10:0x18]
 
-    def verify(self, pk):
-        """True / False for an encrypted packet's tag, None if it can't be checked"""
+    def _tag_ok(self, pk, key, session):
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         d = bytes(pk['data'])
-        if not d.startswith(PIA_MAGIC) or len(d) < 0x20 or not d[4] & 0x80:
-            return None
-        nonce = self.nonce(pk)
+        nonce = self.nonce(pk, session)
         if nonce is None:
             return None
         try:
-            dec = Cipher(algorithms.AES(self.key), modes.GCM(nonce, d[0x18:0x20], min_tag_length=8)).decryptor()
+            dec = Cipher(algorithms.AES(key), modes.GCM(nonce, d[0x18:0x20], min_tag_length=8)).decryptor()
             dec.update(d[0x20:len(d) - d[0x0f]])
             dec.finalize()
             return True
         except Exception:
             return False
+
+    def find(self, pk):
+        """The (key, session) this packet verifies with, None if none does or it can't be checked"""
+        d = bytes(pk['data'])
+        if not d.startswith(PIA_MAGIC) or len(d) < 0x20 or not d[4] & 0x80 or pk['src'] not in self.macs:
+            return None
+        known = self.pair.get(pk['src'])
+        if known and self._tag_ok(pk, *known):
+            return known
+        for key in self.keys:
+            for session in self.sessions:
+                if (key, session) != known and self._tag_ok(pk, key, session):
+                    self.pair[pk['src']] = (key, session)
+                    return key, session
+        return None
+
+    def verify(self, pk):
+        """True / False for an encrypted packet's tag, None if it can't be checked"""
+        d = bytes(pk['data'])
+        if not d.startswith(PIA_MAGIC) or len(d) < 0x20 or not d[4] & 0x80 or pk['src'] not in self.macs:
+            return None
+        return self.find(pk) is not None
 
     def decrypt(self, pk):
         d = bytes(pk['data'])
@@ -176,13 +202,16 @@ class Pia:
             return None
         if not d[4] & 0x80:
             return d[0x10:]  # not encrypted
-        nonce = self.nonce(pk)
-        if nonce is None:
+        pair = self.find(pk)
+        if pair is None:
             return None
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        ecb = Cipher(algorithms.AES(pair[0]), modes.ECB()).encryptor()
+        nonce = self.nonce(pk, pair[1])
         body = d[0x20:len(d) - d[0x0f]]
         out = bytearray()
         for i in range(0, len(body), 16):
-            ks = self.ecb.update(nonce + struct.pack('>I', 2 + i // 16))
+            ks = ecb.update(nonce + struct.pack('>I', 2 + i // 16))
             out += bytes(a ^ b for a, b in zip(body[i:i + 16], ks))
         return bytes(out)
 
@@ -216,10 +245,10 @@ PIA_TYPES = {0x08: 'leave', 0x14: 'connect', 0x18: 'session', 0x1c: 'clock', 0x2
 
 
 def switch_messages(path):
-    key, macs, session, packets = read_switch(path)
-    if not key or session is None:
+    keys, macs, sessions, packets = read_switch(path)
+    if not keys or not sessions:
         sys.exit('no Pia key or advertise data in %s (an older capture?)' % path)
-    pia = Pia(key, macs, session)
+    pia = Pia(keys, macs, sessions)
     for pk in packets:
         pt = pia.decrypt(pk)
         if pt is None:
@@ -261,10 +290,10 @@ def cmd_compare(sw_path, pc_path):
 
 
 def cmd_verify(path):
-    key, macs, session, packets = read_switch(path)
-    if not key or session is None:
+    keys, macs, sessions, packets = read_switch(path)
+    if not keys or not sessions:
         sys.exit('no Pia key or advertise data in %s (an older capture?)' % path)
-    pia = Pia(key, macs, session)
+    pia = Pia(keys, macs, sessions)
     c = collections.Counter(pia.verify(pk) for pk in packets)
     print('tags right: %d, wrong: %d, not checked (not Pia, not encrypted, unknown sender): %d' % (c[True], c[False], c[None]))
 
