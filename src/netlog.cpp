@@ -2,8 +2,13 @@
 // encrypts it, to rise_netlog.txt next to the game. For comparing with the Switch version's Local Play (the
 // mhrise-recomp port's Debug → Capture Local Play): the same text format, a line per packet and its bytes in hex.
 //
-// How it gets in: the game loads dinput8.dll at start; this one is it. It loads the real one from System32 and passes
-// its six functions through (exports.def), so input works as before.
+// How it gets in, two ways from the same code:
+// - dinput8.dll: the game loads it at start; this one loads the real one from System32 and passes its six functions
+//   through (exports.def), so input works as before.
+// - rise_crossplay.dll (RISE_PLUGIN): a REFramework plugin, for when REFramework already is the dinput8.dll.
+//   REFramework loads everything in reframework/plugins while it starts, which is still well before the game creates
+//   its Steam interfaces, so the hooks go in from DllMain the same way; reframework_plugin_initialize only catches a
+//   Steam library that showed up in between.
 //
 // What it watches: every Steam call goes through the Steam client library's CreateInterface (steamclient64.dll, or a
 // library in its place). LoadLibraryExW is hooked to catch that library the moment it's loaded, and its
@@ -689,6 +694,12 @@ HMODULE WINAPI load_library(LPCWSTR name, HANDLE file, DWORD flags) {
     return m;
 }
 
+// The Steam libraries if they were loaded before the hook on LoadLibraryExW went in
+void catch_up() {
+    for (const wchar_t* n : {L"steamclient64.dll", L"OnlineFix64.dll"}) check_module(GetModuleHandleW(n));
+    for (const wchar_t* n : {L"steam_api64.dll", L"OnlineFix64.dll"}) check_flat(GetModuleHandleW(n));
+}
+
 void start() {
     bridge::set_log([](const char* line) { log_line("bridge: %s\n", line); });
     bridge::set_own_id(my_id);
@@ -704,12 +715,24 @@ void start() {
         if (fn && MH_CreateHook(fn, reinterpret_cast<void*>(&load_library), reinterpret_cast<void**>(&g_load_library)) == MH_OK)
             MH_EnableHook(fn);
     }
-    // Already loaded before us?
-    for (const wchar_t* n : {L"steamclient64.dll", L"OnlineFix64.dll"}) check_module(GetModuleHandleW(n));
-    for (const wchar_t* n : {L"steam_api64.dll", L"OnlineFix64.dll"}) check_flat(GetModuleHandleW(n));
+    catch_up();
 }
 
 }  // namespace
+
+#ifdef RISE_PLUGIN
+
+// ---- REFramework plugin -----------------------------------------------------------------------------------------------
+
+// REFramework calls this once it's up. The parameter (REFrameworkPluginInitializeParam) isn't needed: nothing here
+// uses REFramework's API, so there's no required version to declare either.
+extern "C" __declspec(dllexport) bool reframework_plugin_initialize(const void*) {
+    log_line("rise-pc-netlog: loaded as a REFramework plugin\n");
+    catch_up();
+    return true;
+}
+
+#else
 
 // ---- dinput8.dll: the real one's functions, passed through ------------------------------------------------------------
 
@@ -756,6 +779,8 @@ extern "C" LPCVOID WINAPI proxy_GetdfDIJoystick() {
     auto fn = reinterpret_cast<LPCVOID(WINAPI*)()>(real("GetdfDIJoystick"));
     return fn ? fn() : nullptr;
 }
+
+#endif
 
 BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {

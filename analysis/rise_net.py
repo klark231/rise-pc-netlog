@@ -30,7 +30,7 @@ import zlib
 
 # ---- PC: rise_netlog.txt ---------------------------------------------------------------------------------------------
 
-PC_PACKET = re.compile(r'^(\S+) ([<>]) (\w+) peer (\S+) channel (-?\d+)\s+(\d+) bytes')
+PC_PACKET = re.compile(r'^(\S+) ([<>]) ([\w()]+) peer (\S+) channel (-?\d+)\s+(\d+) bytes')
 HEX_ROW = re.compile(r'^  [0-9a-f]{4}  ((?:[0-9a-f]{2} ?)+)')
 
 

@@ -26,3 +26,9 @@ add_library(dinput8 SHARED src/netlog.cpp src/bridge.cpp src/exports.def)
 target_link_libraries(dinput8 PRIVATE minhook ws2_32)
 target_compile_definitions(dinput8 PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
 set_target_properties(dinput8 PROPERTIES OUTPUT_NAME dinput8)
+
+# The same code as a REFramework plugin (reframework/plugins/rise_crossplay.dll), for games that already have
+# REFramework as their dinput8.dll
+add_library(rise_crossplay SHARED src/netlog.cpp src/bridge.cpp)
+target_link_libraries(rise_crossplay PRIVATE minhook ws2_32)
+target_compile_definitions(rise_crossplay PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS RISE_PLUGIN)

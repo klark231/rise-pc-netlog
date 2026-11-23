@@ -10,12 +10,14 @@ Steam.
 
 ## Use
 
-1. Download `rise-pc-netlog.zip` from the latest release and put `dinput8.dll` in the game folder, next to
-   `MonsterHunterRise.exe`. (If you use REFramework, which is also a `dinput8.dll`, take it out while testing.)
+1. Download `rise-pc-netlog.zip` from the latest release.
+   - **With REFramework** (it's the game's `dinput8.dll` already): put `rise_crossplay.dll` in
+     `reframework/plugins` in the game folder. Both load, nothing to take out.
+   - **Without it:** put `dinput8.dll` in the game folder, next to `MonsterHunterRise.exe`.
 2. Start the game and play online with someone: host or join a lobby, walk around, post a quest.
 3. Close the game and send `rise_netlog.txt` from the game folder.
 
-Remove `dinput8.dll` when you're done; the log grows fast while you're online.
+Remove the DLL when you're done; the log grows fast while you're online.
 
 ## What's in the log
 
@@ -32,8 +34,9 @@ Remove `dinput8.dll` when you're done; the log grows fast while you're online.
 
 ## How it works
 
-The game loads `dinput8.dll` at start; this one loads the real one from System32 and passes its functions through. It
-hooks `LoadLibraryExW` to catch the Steam client library as it loads, hooks its `CreateInterface`, and wraps the send and
+The game loads `dinput8.dll` at start; this one loads the real one from System32 and passes its functions through. The
+plugin build, `rise_crossplay.dll`, is the same code without that part: REFramework loads the DLLs in
+`reframework/plugins` while it starts, still before the game creates its Steam interfaces. Either way, it hooks `LoadLibraryExW` to catch the Steam client library as it loads, hooks its `CreateInterface`, and wraps the send and
 receive functions of the networking interfaces the game asks for (`ISteamNetworking`, `ISteamNetworkingMessages`,
 `ISteamNetworkingSockets`) and the lobby functions of `ISteamMatchmaking`, logging the data and calling the originals.
 
@@ -46,7 +49,13 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-GitHub Actions builds it on every push (artifact `rise-pc-netlog`) and makes a release for every `v*` tag.
+That makes both, `dinput8.dll` and `rise_crossplay.dll`. GitHub Actions builds them on every push (artifact
+`rise-pc-netlog`) and makes a release for every `v*` tag.
+
+## Probe
+
+`probe/crossplay_probe.lua` is a REFramework script that logs what the game does with the other players' hunters (see
+`probe/README.md`). It runs on PC and on the Android port alike.
 
 ## Credits
 

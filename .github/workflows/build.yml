@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -35,6 +35,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item build/Release/dinput8.dll out/
+          Copy-Item build/Release/rise_crossplay.dll out/
+          New-Item -ItemType Directory -Force out/probe | Out-Null
+          Copy-Item probe/crossplay-probe.zip out/probe/
+          Copy-Item probe/crossplay_probe.lua out/probe/
           Copy-Item dist/RiseBridge.exe out/
           Copy-Item BRIDGE.md out/
           Copy-Item README.md out/
@@ -48,4 +52,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" rise-pc-netlog.zip --title "${{ github.ref_name }}" --notes "dinput8.dll goes next to MonsterHunterRise.exe. See README."
+          gh release create "${{ github.ref_name }}" rise-pc-netlog.zip --title "${{ github.ref_name }}" --notes "With REFramework: rise_crossplay.dll goes in reframework/plugins. Without it: dinput8.dll goes next to MonsterHunterRise.exe. See README."

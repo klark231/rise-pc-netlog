@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Rise Bridge: one small window for the PC side of bridge mode.
 
-  - finds the game folder (Steam), copies dinput8.dll in, and switches bridge mode on/off (rise_bridge.txt)
+  - finds the game folder (Steam), puts the DLL in (as a REFramework plugin when REFramework is there, otherwise as
+    dinput8.dll) and switches bridge mode on/off (rise_bridge.txt)
   - runs the helper (the bridge daemon) while you play, with its log in the window
 
 Double-click RiseBridge.exe (or Start-Bridge.cmd). `--console` runs without a window (prompts in the terminal).
@@ -15,6 +16,7 @@ sys.path.insert(0, os.path.join(HERE, "tools"))
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else HERE
 GAME_EXE, FLAG, DLL = "MonsterHunterRise.exe", "rise_bridge.txt", "dinput8.dll"
+PLUGIN = "rise_crossplay.dll"    # the same code built as a REFramework plugin (reframework/plugins)
 CAL_FLAG, HELLO = "rise_bridge_calibrate.txt", "rise_hello.txt"
 DEFAULTS = {"server": "meoli.viewdns.net", "key": "", "name": "PCBridge", "game_dir": ""}
 CONFIG = os.path.join(APP_DIR, "RiseBridge.json")
@@ -83,12 +85,21 @@ def find_game_dir(libraries=None):
     return ""
 
 
-def find_dll():
+def find_dll(name=DLL):
     for d in (APP_DIR, HERE, getattr(sys, "_MEIPASS", HERE), os.path.join(HERE, "..", "build", "Release")):
-        p = os.path.join(d, DLL)
+        p = os.path.join(d, name)
         if os.path.isfile(p):
             return p
     return ""
+
+
+def uses_reframework(game_dir):
+    """REFramework is installed (it makes its folder on the first start), or was before we set our dinput8.dll aside"""
+    return os.path.isdir(os.path.join(game_dir, "reframework")) or os.path.isfile(os.path.join(game_dir, DLL + ".bak"))
+
+
+def plugin_path(game_dir):
+    return os.path.join(game_dir, "reframework", "plugins", PLUGIN)
 
 
 def check_game_dir(game_dir):
@@ -118,31 +129,65 @@ def set_calibrate(game_dir, on):
     return "calibration OFF"
 
 
-def install(game_dir, dll_src=None):
-    """Copy dinput8.dll into the game folder and switch bridge mode on. Returns a list of log lines."""
+def install(game_dir, dll_src=None, plugin_src=None):
+    """Put the DLL in and switch bridge mode on. Returns a list of log lines.
+
+    With REFramework (its own dinput8.dll) the DLL goes in as a plugin, reframework/plugins/rise_crossplay.dll, so
+    both load. Without it, as dinput8.dll next to the game."""
     if not check_game_dir(game_dir):
         raise ValueError("%s not found in %r" % (GAME_EXE, game_dir))
+    if uses_reframework(game_dir):
+        msgs = _install_plugin(game_dir, plugin_src if plugin_src is not None else find_dll(PLUGIN))
+    else:
+        msgs = _install_dinput8(game_dir, dll_src if dll_src is not None else find_dll())
+    open(os.path.join(game_dir, FLAG), "w").close()
+    msgs.append("bridge mode ON (%s created)" % FLAG)
+    return msgs
+
+
+def _copy(src, dst):
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+    except PermissionError:
+        raise ValueError("can't write %s: the game (or Steam) is still using it. Close MonsterHunterRise.exe "
+                         "completely (check Task Manager) and try again." % dst)
+
+
+def _install_plugin(game_dir, src):
+    msgs = []
+    dst, dll = plugin_path(game_dir), os.path.join(game_dir, DLL)
+    # An older install put our dinput8.dll in REFramework's place: REFramework goes back
+    if os.path.isfile(dll + ".bak"):
+        try:
+            os.replace(dll + ".bak", dll)
+        except PermissionError:
+            raise ValueError("can't write %s: close MonsterHunterRise.exe completely and try again." % dll)
+        msgs.append("put your own dinput8.dll (REFramework) back from dinput8.dll.bak")
+    if src and os.path.isfile(dst) and _same(src, dst):
+        msgs.append("reframework/plugins/%s is already up to date" % PLUGIN)
+    elif src:
+        _copy(src, dst)
+        msgs.append("REFramework found: copied %s into reframework/plugins" % PLUGIN)
+    elif os.path.isfile(dst):
+        msgs.append("no %s next to the app; using the one already in reframework/plugins" % PLUGIN)
+    else:
+        raise ValueError("%s is missing: put it next to this app (it comes in the same zip)" % PLUGIN)
+    return msgs
+
+
+def _install_dinput8(game_dir, src):
     msgs = []
     dst = os.path.join(game_dir, DLL)
-    src = dll_src if dll_src is not None else find_dll()
     if src and os.path.isfile(dst) and _same(src, dst):
         msgs.append("%s in the game folder is already up to date" % DLL)
     elif src:
-        try:
-            if os.path.isfile(dst) and os.path.getsize(dst) and not os.path.exists(dst + ".bak"):
-                shutil.copy2(dst, dst + ".bak")
-                msgs.append("kept your existing dinput8.dll as dinput8.dll.bak (REFramework? it won't load next to this one)")
-            shutil.copy2(src, dst)
-        except PermissionError:
-            raise ValueError("can't write %s: the game (or Steam) is still using it. Close MonsterHunterRise.exe "
-                             "completely (check Task Manager) and try again." % dst)
+        _copy(src, dst)
         msgs.append("copied %s into the game folder" % DLL)
     elif os.path.isfile(dst):
         msgs.append("no %s next to the app; using the one already in the game folder" % DLL)
     else:
         raise ValueError("%s is missing: put it next to this app (it comes in the same zip)" % DLL)
-    open(os.path.join(game_dir, FLAG), "w").close()
-    msgs.append("bridge mode ON (%s created)" % FLAG)
     return msgs
 
 
@@ -154,7 +199,8 @@ def _same(a, b):
 
 
 def remove(game_dir, with_dll=False):
-    """Back to normal Steam play: delete rise_bridge.txt (and, optionally, dinput8.dll, restoring a .bak)."""
+    """Back to normal Steam play: delete rise_bridge.txt (and, optionally, our DLL: the plugin, or dinput8.dll with a
+    .bak put back)."""
     msgs = []
     flag = os.path.join(game_dir, FLAG)
     if os.path.isfile(flag):
@@ -163,8 +209,11 @@ def remove(game_dir, with_dll=False):
     if os.path.isfile(os.path.join(game_dir, CAL_FLAG)):
         os.remove(os.path.join(game_dir, CAL_FLAG))
     if with_dll:
+        if os.path.isfile(plugin_path(game_dir)):
+            os.remove(plugin_path(game_dir))
+            msgs.append("removed reframework/plugins/%s" % PLUGIN)
         dll = os.path.join(game_dir, DLL)
-        if os.path.isfile(dll):
+        if os.path.isfile(dll) and not uses_reframework(game_dir):
             os.remove(dll)
             msgs.append("removed %s" % DLL)
         if os.path.isfile(dll + ".bak"):
@@ -332,7 +381,7 @@ def run_gui():
         s = settings()
         if not check_game_dir(s["game_dir"]):
             return
-        for m in remove(s["game_dir"], with_dll=messagebox.askyesno("Rise Bridge", "Also remove dinput8.dll from the game folder?")):
+        for m in remove(s["game_dir"], with_dll=messagebox.askyesno("Rise Bridge", "Also remove the bridge DLL from the game folder?")):
             log(m)
         refresh()
 
@@ -386,8 +435,9 @@ def run_gui():
     root.protocol("WM_DELETE_WINDOW", close)
     if not crypto_ok():
         log("WARNING: 'cryptography' is not installed (pip install cryptography); the helper can't start without it")
-    if not find_dll():
-        log("note: dinput8.dll isn't next to this app, so Install can't copy it (it's in the release zip)")
+    if not find_dll() and not find_dll(PLUGIN):
+        log("note: neither dinput8.dll nor %s is next to this app, so Install can't copy them (they're in the "
+            "release zip)" % PLUGIN)
     refresh()
     pump()
     root.mainloop()

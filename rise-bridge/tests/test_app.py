@@ -8,17 +8,27 @@ with tempfile.TemporaryDirectory() as t:
     assert app.find_game_dir([os.path.join(t, "nope"), lib]) == g
     assert not app.bridge_on(g)
     dll = os.path.join(t, "dinput8.dll"); open(dll, "wb").write(b"ours")
-    open(os.path.join(g, "dinput8.dll"), "wb").write(b"reframework")
-    app.install(g, dll)
+    plugin = os.path.join(t, app.PLUGIN); open(plugin, "wb").write(b"plugin")
+    # no REFramework: our dinput8.dll next to the game
+    app.install(g, dll, plugin)
     assert app.bridge_on(g) and open(os.path.join(g, "dinput8.dll"), "rb").read() == b"ours"
-    assert open(os.path.join(g, "dinput8.dll.bak"), "rb").read() == b"reframework"
-    app.install(g, dll)  # again: .bak untouched
-    assert open(os.path.join(g, "dinput8.dll.bak"), "rb").read() == b"reframework"
+    assert not os.path.exists(app.plugin_path(g))
+    app.remove(g, with_dll=True); assert not os.path.exists(os.path.join(g, "dinput8.dll"))
+    # an older install that set REFramework's dinput8.dll aside: it goes back and ours becomes a plugin
+    open(os.path.join(g, "dinput8.dll"), "wb").write(b"ours")
+    open(os.path.join(g, "dinput8.dll.bak"), "wb").write(b"reframework")
+    app.install(g, dll, plugin)
+    assert open(os.path.join(g, "dinput8.dll"), "rb").read() == b"reframework"
+    assert not os.path.exists(os.path.join(g, "dinput8.dll.bak"))
+    assert open(app.plugin_path(g), "rb").read() == b"plugin"
+    app.install(g, dll, plugin)  # again: REFramework untouched, plugin up to date
+    assert open(os.path.join(g, "dinput8.dll"), "rb").read() == b"reframework" and app.bridge_on(g)
     assert not app.calibrate_on(g); app.set_calibrate(g, True); assert app.calibrate_on(g)
     app.set_calibrate(g, False); assert not app.calibrate_on(g)
     app.set_calibrate(g, True); app.remove(g); assert not app.calibrate_on(g)
-    app.remove(g); assert not app.bridge_on(g)
-    app.remove(g, with_dll=True); assert open(os.path.join(g, "dinput8.dll"), "rb").read() == b"reframework"
+    app.remove(g); assert not app.bridge_on(g) and os.path.exists(app.plugin_path(g))
+    app.remove(g, with_dll=True)
+    assert not os.path.exists(app.plugin_path(g)) and open(os.path.join(g, "dinput8.dll"), "rb").read() == b"reframework"
     cfgp = os.path.join(t, "c.json"); app.save_config({"server": "x:1", "key": "k", "name": "n", "game_dir": g, "junk": "z"}, cfgp)
     assert app.load_config(cfgp)["server"] == "x:1" and "junk" not in app.load_config(cfgp)
     assert app.parse_server("a.b") == ("a.b", 39510) and app.parse_server("a:5") == ("a", 5)

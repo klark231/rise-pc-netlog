@@ -325,3 +325,56 @@ station keys and not the MAC). In the 24-byte one, `n` is the sender's own count
 
 The 32-bit `from`/`to` IDs pass through untouched: each side already uses the other's as they come.
 
+
+## 9. The PC hunter that the Switch doesn't show (captures of Nov 24, 05:10 and 05:30)
+
+The PC joins the port's room and both stay in. The PC shows the Switch player's hunter and sees it walk; the Switch
+side shows only its own. The port's `log.txt` has `[ldn] player 1 joined (…), a PC player` and no errors (the game
+doesn't log why it leaves a player out). Compared with two phones (`local_play_20261124_023525`, host `.1`, joiner
+`.2`) and with the bridge sessions (`local_play_20261124_051029`, `local_play_20261124_053008`, the PC at `.2`).
+
+**The `04 02` channel**, both layers off: `04 02 | sender (u32) | receiver (u32) | length (u16) | kind (u8) | body`.
+`length` counts from `kind` on. The low 7 bits of `kind` are `0x1e` or `0x0b`, the top bit marks a bit-packed body
+(`9e`, `8b`). The bodies of `9e`/`8b` aren't byte-aligned and aren't decoded yet.
+
+- **`1e`, 21 bytes:** the steady stream while walking, ~5 a second each way. The PC sends them at the same rate as a
+  Switch, and the port gets them all. (An earlier note here read the few `8b`/`9e` as "nothing is sent"; it was this
+  stream that carries walking.)
+- **`0b 08`, 18 bytes:** `0b 08 | n (u32 BE)`, repeated a few times. **`0b 02`, 482 bytes:** a big transfer in 470-byte
+  pieces, `0b 02 | n + 1 (u32) | id (u32) | total size (u32) | …`. The sender announces `n`, then sends piece after
+  piece of transfer `n + 1`. Between two phones only one of them sends one (id `5435c499`, 215,358 bytes, the same
+  device whether host or joiner); PC to PC, ids `55de5757` (358,357 bytes) and `218c8fd7` (218,097). It goes one way
+  even between phones, so it isn't what's missing. Guild cards arrive fine both ways (tested).
+- **`9e`, the hunter's periodic state:** every hunter sends the same three messages over and over (several a second),
+  and their sizes give the PC away:
+
+| Sender | First (the big one) | Second | Third |
+|---|---|---|---|
+| the port, as host (to a phone and to the PC alike) | 452–455 | 367–370 | 60 |
+| a phone joiner | 435 | 360–362 | 58 |
+| the PC | **338–341** | 369–370 | **51** |
+
+The two phones are a few bytes apart (different hunters, gear). The PC's first message is ~100 bytes shorter every time,
+and in a different order (51 comes second). Reading it the other way works: the PC game draws the port's hunter from
+the Switch-made messages. The Switch game, given the PC-made ones, never puts the hunter in, and the walking stream then
+has nothing to move.
+
+**Names from the game's type database** (`tdb_types.py`, read from the Switch `main`; the PC has the same types):
+
+- `snow.PlayerNetwork` is the hunter's network component: `RefRemoteGameObject` (`via.puppet.RemoteGameObject`),
+  `RefPlayerBase`, `FirstFsmPacketReceived`, `_PacketQue`; methods `sendPeriodicPacket`, `updateSendPeriodicPacket`,
+  26 overloads of `receive`, one per packet type.
+- Its packets: `PlayerPeriodicLobbyBasePacket` (`_Position` vec3, `_Dir`, `_InvalidDataFlags`) in the village/hub,
+  `PlayerPeriodicQuestBasePacket` on a quest (adds aim, vital, condition and weapon flags), `PlayerAreaMovePacket`,
+  `PlayerWarpPacket`, `PlayerConditionChangePacket` and per-weapon ones.
+- `via.puppet.RemoteGameObject` is the engine's replicated object: `MessageVersion`, `SyncMode`, `MasterIndex`,
+  `SyncMotion`/`SyncMotionFSM` and their variables, `CurrentPrefab`, `Instance`, events `OnNtcInstantiate`,
+  `OnNtcRecvState`. The big `9e` messages look like its state sync (motion FSM and its variables), which is where a PC
+  build could pack differently.
+- `snow.player.PlayerManager` makes the hunters: `createPlayer` (3 overloads), `setPlayerCreateBaseData`,
+  `instantiatePlayerParts`; `getPlayer(index)`. `snow.player.PlayerBase`: `isDrawPlayer`, `isMasterPlayer`,
+  `deserializeNetworkCommonFlags`, `deserializeNetworkPlAttr`.
+
+**Next:** `probe/crossplay_probe.lua` logs those calls and each player slot's state on both sides, so one session with
+it shows how far the Switch game gets with the PC's hunter: no slot, a slot that isn't drawn, a network object with a
+different `MessageVersion`, or `receive` calls that never come. That decides what the helper has to convert.

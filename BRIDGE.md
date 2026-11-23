@@ -74,3 +74,27 @@ is in the lobby (patched port, Capture Local Play on at start-up):
 
 It joins your own host about 60 times (about 5 minutes) and saves `hello_map.json`. Put that file next to
 `RiseBridge.exe` (or in the `rise-bridge` folder). The helper's log then says `hello map: loaded`.
+
+## 2026-11-24: REFramework plugin
+
+The DLL now also comes as a REFramework plugin, `rise_crossplay.dll` (same code, built with `RISE_PLUGIN`). RiseBridge's
+**Install** picks it when the game has REFramework (a `reframework` folder, or a `dinput8.dll.bak` from an older
+install): it puts REFramework's `dinput8.dll` back from the `.bak` and copies the plugin to `reframework/plugins`.
+Without REFramework it installs `dinput8.dll` as before. **Back to normal Steam** with the DLL removes whichever is
+there.
+
+How it loads: REFramework loads every DLL in `reframework/plugins` while it starts, and the plugin's `DllMain` puts the
+same hooks in as `dinput8.dll` does. The game creates its Steam interfaces seconds later (`rise_netlog_22`: the Steam
+library at 05:27:48, `SteamClient` at 05:28:03), so nothing is missed. `reframework_plugin_initialize` checks once
+more for a Steam library that showed up in between. The log says `loaded as a REFramework plugin`.
+
+Where this is going: the helper (`RiseBridge.exe`) moves into the plugin too, so the PC side is one file in
+`reframework/plugins` and nothing to start by hand. That waits until crossplay works end to end, because the helper's
+Python is much quicker to change between tests. The order: the bridge rules settle in Python, then they're written again
+in C++ in the plugin (Pia and its AES-GCM, the hub link, the station, the lobby), with the Python tests turned into test
+vectors for the C++.
+
+## 2026-11-24: the Switch doesn't show the PC hunter
+
+Joining works both ways now, and the PC shows the Switch player's hunter walking around, but the Switch side never
+shows the PC's. See `analysis/NOTES.md`, section 9. `probe/` has the script that finds out where the Switch game stops.
