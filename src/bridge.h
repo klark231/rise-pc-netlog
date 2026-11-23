@@ -31,6 +31,7 @@ int receive(int channel, void** out, int max);   // appends SteamNetworkingMessa
 // Steam callbacks (Steam_BGetCallback / ISteamUtils call results)
 bool pop_callback(int* id, const uint8_t** data, int* size);  // a fake callback to hand the game, if one is due
 void free_callback();
+void auth_ok(uint64_t id);               // a ticket check for the stand-in passes (callback 143 queued)
 bool is_completed(uint64_t handle);
 bool get_result(uint64_t handle, void* out, int cap, int expected, bool* failed);
 

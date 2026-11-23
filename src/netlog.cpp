@@ -452,6 +452,46 @@ void wrap_matchmaking(void* m) {
     }
 }
 
+// ---- ISteamUser 021: the Steam auth tickets players swap in the lobby ---------------------------------------------------
+// Slots: GetAuthSessionTicket 13, BeginAuthSession 14, EndAuthSession 15. Each player's lobby record carries a ticket
+// (234 bytes, for app 480), and the others check it with BeginAuthSession; logged to see what the game does when a
+// check fails. In bridge mode the check of the Switch host's made-up ID passes without asking Steam.
+
+using GetTicket = uint32_t(__fastcall*)(void*, void*, int, uint32_t*);
+using BeginAuth = int(__fastcall*)(void*, const void*, int, uint64_t);
+using EndAuth = void(__fastcall*)(void*, uint64_t);
+GetTicket g_get_ticket = nullptr;
+BeginAuth g_begin_auth = nullptr;
+EndAuth g_end_auth = nullptr;
+
+uint32_t __fastcall get_ticket(void* self, void* out, int cap, uint32_t* size) {
+    const uint32_t h = g_get_ticket(self, out, cap, size);
+    log_line("GetAuthSessionTicket -> handle %u, %u bytes\n", h, size ? *size : 0);
+    return h;
+}
+
+int __fastcall begin_auth(void* self, const void* ticket, int size, uint64_t id) {
+    if (bridge::fake_user(id)) {
+        bridge::auth_ok(id);
+        return 0;  // k_EBeginAuthSessionResultOK
+    }
+    const int r = g_begin_auth(self, ticket, size, id);
+    log_line("BeginAuthSession %llu, %d bytes -> %d\n", static_cast<unsigned long long>(id), size, r);
+    return r;
+}
+
+void __fastcall end_auth(void* self, uint64_t id) {
+    log_line("EndAuthSession %llu\n", static_cast<unsigned long long>(id));
+    if (!bridge::fake_user(id)) g_end_auth(self, id);
+}
+
+void wrap_user(void* u) {
+    if (!u) return;
+    wrap_slot(u, 13, &get_ticket, g_get_ticket);
+    wrap_slot(u, 14, &begin_auth, g_begin_auth);
+    wrap_slot(u, 15, &end_auth, g_end_auth);
+}
+
 // ---- ISteamClient: GetISteamGenericInterface 12, GetISteamNetworking 16 -------------------------------------------------
 
 using GetGeneric = void*(__fastcall*)(void*, int, int, const char*);
@@ -471,7 +511,10 @@ void wrap_by_name(const char* version, void* itf) {
     if (!version || !itf) return;
     if (!strncmp(version, "SteamMatchMaking0", 17)) wrap_matchmaking(itf);
     else if (!strncmp(version, "SteamUtils0", 11)) wrap_utils(itf);
-    else if (!strncmp(version, "SteamUser0", 10)) g_user = itf;
+    else if (!strncmp(version, "SteamUser0", 10)) {
+        g_user = itf;
+        wrap_user(itf);
+    }
     else if (!strncmp(version, "SteamNetworkingMessages", 23)) wrap_messages(itf);
     else if (!strncmp(version, "SteamNetworkingSockets", 22)) wrap_sockets(itf);
     else if (!strncmp(version, "SteamNetworking", 15)) wrap_networking(itf);

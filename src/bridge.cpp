@@ -427,6 +427,22 @@ int receive(int channel, void** out, int max) {
     return n;
 }
 
+// The game checks every member's Steam auth ticket (BeginAuthSession), and Steam answers with ValidateAuthTicketResponse_t
+// (143) later. A Switch player has no ticket and Steam doesn't know the made-up ID, so for that ID the answer is OK,
+// from here.
+void auth_ok(uint64_t id) {
+    std::lock_guard lock(g_m);
+#pragma pack(push, 4)
+    struct Validate {
+        uint64_t id;
+        int response;  // k_EAuthSessionResponseOK
+        uint64_t owner;
+    } v{id, 0, id};
+#pragma pack(pop)
+    g_cbs.push_back({143, bytes_of(v)});
+    L("BeginAuthSession for the Switch host's ID: answered OK, callback 143 queued");
+}
+
 bool pop_callback(int* id, const uint8_t** data, int* size) {
     std::lock_guard lock(g_m);
     if (g_list_handle && static_cast<int>(GetTickCount() - g_list_deadline) > 0) {  // the daemon never answered
