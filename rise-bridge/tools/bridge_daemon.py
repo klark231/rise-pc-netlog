@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse, base64, os, socket, struct, sys, threading, time, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from bridge import gamemsg, hellomap, hublink, joinmsgs, memberid
+from bridge import gamemsg, hellomap, hublink, joinmsgs
 from bridge.station import Station
 
 CON_REQ, CON_ANS = b"SteamConReq\x00", b"SteamConAns\x00"
@@ -14,7 +14,6 @@ class Daemon:
         self.dll = None
         self.hubs = []
         self.link = self.station = None
-        self.pc_handshake = None  # Store the PC's original 36-byte packet
         here = os.path.dirname(os.path.abspath(__file__))
         self.hello_map = hellomap.find(os.getcwd(), os.path.join(here, ".."), here, os.path.dirname(os.path.abspath(sys.argv[0])))
         self.log("hello map: %s" % ("loaded" if self.hello_map else "none"))
@@ -62,33 +61,13 @@ class Daemon:
             self.log("join failed: %s" % e)
             self.reply("ERR %s" % e)
 
-    def member_reply(self, host: int, payload: bytes) -> None:
-        """The host sent its 0203 member message: answer it the way a Switch joiner does (its own 0203, then the 0302 reply),
-        built from the two identities that message carries (bridge/memberid.py). Repeated every 2 s while the host
-        keeps asking, up to 10 times."""
-        ids = memberid.learn(payload)
-        st = self.station
-        if not ids or st is None or st.state != "in":
-            return
-        now = time.monotonic()
-        last = getattr(self, "_member_t", None)
-        if (last is not None and now - last < 2.0) or getattr(self, "_member_n", 0) >= 10:
-            return
-        self._member_t, self._member_n = now, getattr(self, "_member_n", 0) + 1
-        id_host, id_me = ids
-        self.log("[member] host id %s, our id %s: sending the 0203 and 0302 replies (try %d)" % (id_host.hex(), id_me.hex(), self._member_n))
-        st.send_game(host, memberid.member_msg(id_me, id_host))
-        st.send_game(host, memberid.reply_msg(id_me, id_host))
-
     def from_switch(self, addr: int, payload: bytes) -> None:
         self.log("Switch host -> game: %d bytes" % len(payload))
         fixed = gamemsg.to_pc(payload)
         if fixed != payload:
-            self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01)")
+            self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01), same identity %s"
+                     % gamemsg.identity(fixed).hex())
             payload = fixed
-
-        self.member_reply(addr, payload)
-
         self.reply("RECV " + joinmsgs.steam_wrap(payload).hex())
 
     def to_switch(self, data: bytes) -> None:
@@ -100,12 +79,9 @@ class Daemon:
         game = joinmsgs.steam_unwrap(data)
         self.log("game -> Switch host: %d bytes" % (len(game) if game else 0))
         
-        if game is not None and len(game) >= 8 and gamemsg.data_of(game)[:2] == memberid.T_REPLY:
-            # The PC game's own 0302 reply is 36 bytes (a Switch joiner's is 16) and carries the PC's identity: the host
-            # never accepted it. The helper sends the Switch-style one itself (member_reply), so this one is dropped.
-            self.log("game's own 0302 reply (%d bytes) not forwarded; the helper answers the host itself" % len(game))
-            return
-
+        # The game's member messages (0203, 0302) go to the host as they are. They used to be replaced with made-up
+        # Switch-style ones, because the host rejected the PC's: the platform message had told the host another identity
+        # (see gamemsg.set_platform), so nothing the PC sent afterwards matched it.
         st = self.station
         if game is None or st is None or st.state != "in":
             return
@@ -116,6 +92,8 @@ class Daemon:
                 game = self.hello_map.message_for(host_mac)
             fixed = gamemsg.to_switch(game)
             if fixed != game:
+                self.log("the game's platform message made the way a Switch sends it (0x01 -> 0x20), same identity %s"
+                         % gamemsg.identity(fixed).hex())
                 game = fixed
             st.send_game(host, game)
 

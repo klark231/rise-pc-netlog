@@ -8,6 +8,7 @@ import os
 import struct
 import threading
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
@@ -15,6 +16,25 @@ from . import joinmsgs
 from .hublink import Link, NetInfo
 from .pia import (Header, Message, PiaCrypto, T_CLOCK, T_CONNECT, T_GAME, T_KEEPALIVE, T_LEAVE, T_MESH, T_SESSION,
                   build_body, parse_body, station_id)
+
+# A game message with Pia's flag 0x20 is zlib-compressed (a 4 KB window: it starts 48 4b, and ends with a sync flush
+# and an empty last block). The Switch does this to its larger member messages (0203 and 0302 of 105 to 129 bytes, in
+# three captures); the PC never compresses, Steam carries them as they are. So what comes from the Switch is
+# inflated before the PC game gets it, and the PC's larger ones are compressed the Switch's way.
+COMPRESSED = 0x20
+COMPRESS_FROM = 64           # the Switch's own: 21 bytes and under go plain, 105 and up compressed
+MEMBER_KINDS = (b"\x02\x03", b"\x03\x02")
+
+
+def compress_game(payload: bytes):
+    """The payload compressed as the Switch sends it, or None if it goes plain"""
+    if len(payload) < COMPRESS_FROM or len(payload) < 6:
+        return None
+    if bytes(b ^ payload[3] for b in payload[4:6]) not in MEMBER_KINDS:
+        return None
+    c = zlib.compressobj(5, zlib.DEFLATED, 12)
+    return c.compress(payload) + c.flush(zlib.Z_SYNC_FLUSH) + c.flush(zlib.Z_FINISH)
+
 
 PORT = 12345  # CERTAIN: every station's address in the captures ends in :12345
 
@@ -114,7 +134,11 @@ class Station:
         return Message(ptype, payload, port=0, flags=flags, dst=dst)
 
     def send_game(self, dst: int, payload: bytes) -> None:
-        self.send(dst, [self.msg(T_GAME, payload, dst)])
+        m = self.msg(T_GAME, payload, dst)
+        packed = compress_game(payload)
+        if packed is not None:
+            m = Message(m.ptype, packed, port=m.port, flags=m.flags | COMPRESSED, dst=m.dst)
+        self.send(dst, [m])
 
     def leave_session(self) -> None:
         """Tell the host we're going (Pia 0x08, empty), so it drops our station instead of waiting for a timeout."""
@@ -165,6 +189,11 @@ class Station:
     def _message(self, src: int, m: Message) -> None:
         host, host_mac = self._host()
         p = m.payload
+        if m.ptype == T_GAME and m.flags & COMPRESSED:
+            try:
+                p = zlib.decompress(p)
+            except zlib.error as e:
+                self.log("a compressed game message from %08x didn't inflate (%s); passed on as it is" % (src, e))
         if src != host:
             if m.ptype == T_GAME:
                 self.on_game(src, p)

@@ -6,7 +6,8 @@ for bits 32..39 from the end of the body were solved from captured messages (and
 messages in a leave-one-out test).
 
 The use: the host's 12-byte message is 00 01 03 01 <platform> <4 bytes>. A Switch sends platform 0x20, a PC 0x01; the PC
-game leaves as soon as it sees 0x20, so it is turned into 0x01.
+game leaves as soon as it sees 0x20, so it is turned into 0x01 (and the other way for the PC's), keeping the identity
+in the 4 bytes the same (set_platform).
 """
 
 # header delta for flipping body bit n (counted from the last bit of the body), n = 32..39
@@ -42,18 +43,40 @@ def is_platform_msg(msg: bytes) -> bool:
     return len(msg) == 12 and parse(msg)[1][:4] == bytes.fromhex("00010301")
 
 
+def set_platform(msg: bytes, platform: int) -> bytes:
+    """The platform message with another platform byte, saying the same identity.
+
+    Its data is 01 03 01 <platform> <id ^ (platform ^ 03), 4 bytes>: the sender's 4-byte identity, the one its member
+    messages (0203, 0302, 0406) carry as it is, XORed with the platform byte ^ 03. Checked on both: a PC's id ^ 02
+    (platform 01), a Switch's id ^ 23 (platform 20), each against the same sender's 0203 messages. So changing only
+    the platform byte changes the identity the other side learns (by 0x21 per byte), and then nothing that player
+    sends afterwards matches it: the id bytes have to change with it."""
+    d = data_of(msg)
+    flip = d[3] ^ platform
+    return seal(d[:3] + bytes([platform]) + bytes(b ^ flip for b in d[4:8]))
+
+
 def to_pc(msg: bytes) -> bytes:
     """A message from a Switch host, made the way a PC sends it (only the 12-byte platform message changes)"""
     if is_platform_msg(msg) and parse(msg)[1][4] != 0x01:
-        return set_byte(msg, 4, 0x01)
+        return set_platform(msg, 0x01)
     return msg
 
 
 def to_switch(msg: bytes) -> bytes:
     """A message from the PC game, made the way a Switch sends it (the platform message 0x01 -> 0x20)"""
     if is_platform_msg(msg) and parse(msg)[1][4] != 0x20:
-        return set_byte(msg, 4, 0x20)
+        return set_platform(msg, 0x20)
     return msg
+
+
+def identity(msg: bytes):
+    """The sender's 4-byte identity from its platform message (None for any other message)"""
+    if not is_platform_msg(msg):
+        return None
+    d = data_of(msg)
+    return bytes(b ^ d[3] ^ 0x03 for b in d[4:8])
+
 
 # ---- the full checksum, from bridge/headertable.py (solved from captures) -------------------------------------------
 def seal(data: bytes) -> bytes:

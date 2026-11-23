@@ -28,6 +28,20 @@ Double-click `Start-Bridge.cmd` in the repo folder. It needs Python 3 for Window
 same window (`Start-Bridge.cmd --console` for the terminal version). Copy `dinput8.dll` next to it first.
 `Build-Exe.cmd` builds `dist\RiseBridge.exe` yourself.
 
+## Fixes after the 2026-11-23 test (stuck after joining)
+
+Both games kept resending the same messages and nothing moved past the member exchange. Two causes, both in the
+helper:
+- **The Switch compresses its larger member messages** (Pia message flag `0x20`, zlib, starting `48 4b`). The host's
+  info message reached the PC still compressed, so the PC never got the host info it waits for. The helper now
+  inflates them for the PC, and compresses the PC's larger `0203` / `0302` messages the Switch's way.
+- **The platform message also carries the sender's identity**, as `id ^ (platform ^ 03)`. Flipping only the platform
+  byte (01 <-> 20) changed the identity each side learned by 0x21 per byte, so the host rejected everything the PC sent
+  afterwards (which is why the helper made up its own member replies and dropped the PC's). The flip now keeps the
+  identity, and the PC's own member messages go through unchanged; the made-up replies are gone.
+
+The helper's log now says `same identity <8 hex digits>` when it converts a platform message.
+
 ## What the log lines mean
 
 Lines starting `bridge:` in `rise_netlog.txt` show each step:
