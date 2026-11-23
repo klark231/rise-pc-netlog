@@ -5,14 +5,11 @@ bridge), 2026-11-20 to 2026-11-23.
 
 ## Reading the messages
 
-A game message is `[4-byte checksum header][data]`, with the data XORed with the header's last byte
-(`gamemsg.data_of`). Inside that, **each byte is also XORed with the byte before it** (as sent):
-
-    plain[0] = data[0];  plain[i] = data[i] ^ data[i - 1]
-
-With both undone, the member messages are readable. `data[0:2]` is the channel: `01 03` keep-alive counters, `02 03`
-member status, `03 02` the reliable lobby channel, `04 06` game data. After the channel, two 4-byte identities (the
-sender's and the receiver's, chain-decoded so they look different from the raw IDs).
+`rise-bridge/bridge/wire.py` has the exact encoding, checked on every captured game message (34,484 PC, 8,961
+Switch): a message is a 4-byte check (CRC-32 of the payload, adjusted by length) followed by the payload, all of it
+sent as a running XOR. With that undone the payloads are plain. They start with a channel: `01 02` control (hello,
+platform and identity, counters), `02 01` member status, `03 01` the lobby, `04 02` game data. The platform message
+is `01 02 02 <platform> <id>`, PC `00`, Switch `21`.
 
 The Switch compresses some of these first (Pia flag `0x20`, zlib); see `bridge/station.py`.
 
@@ -50,19 +47,20 @@ This is local to the PC that checks: nothing about it goes to the other side. So
 `BeginAuthSession` for the bridge's host ID returns OK without asking Steam, and the DLL hands the game callback 143
 with OK itself (`netlog.cpp` `begin_auth`, `bridge.cpp` `auth_ok`). Any bytes will do as that host's ticket.
 
-## What the bridge has to do (PC joining a Switch host)
+## What the bridge does (rise-bridge/bridge/lobby.py)
 
-1. **Toward the PC, play the PC host's side of the lobby.** Answer the PC's join request (record `01`) with records
-   `02`, `08` (a dummy ticket for the made-up host ID), `03` for any other member, `05`, in the PC host's layout.
-   Still to work out: the fields of `02` (23 bytes) and `03` (36 bytes) beyond the Steam IDs.
-2. **Keep the reliable channel's numbering apart on the two sides.** The bridge adds records the Switch never sent
-   and drops ones the PC sends (its join request, its ticket), so each side's sequence and acknowledgement numbers
-   have to be translated, for the rest of the session.
-3. **Toward the Switch, play a Switch joiner:** acknowledge the room description, send the 21-byte `02 03` and the
-   16-byte `03 02` (the old helper's `memberid` messages, now with the right identities), and let the PC's player
-   data through on `04 06`.
-4. **Check the `04 06` data** once the PC gets that far: the PC's join-time bulk data (486-byte messages, kind
-   `01 d6 0b 02 00`) has no Switch counterpart.
+The lobby channel isn't passed through any more:
+- **Toward the PC it is the PC host.** The PC's join request gets records `02` (session: `u64 3`, the made-up host's
+  Steam ID, 4 bytes that stay the same per host, here the Switch host's id), `08` (that ID's ticket, the real layout
+  with no signature) and `05`. Then a keep-alive record every half second, and every record the PC hasn't
+  acknowledged goes again with the next one, as both games do.
+- **Toward the port host it is a Switch joiner:** each lobby message is acknowledged with the 12-byte message a real
+  Switch joiner sent (byte for byte the same in the test).
+- The member status (`02 01`) and game data (`04 02`) go through unchanged, the platform message with the other
+  side's platform byte and the same identity.
+
+Not done yet: other players besides the host (record `03` entries), and what the PC's join-time bulk data on `04 02`
+(486-byte messages) does to the Switch host.
 
 ## Next test
 

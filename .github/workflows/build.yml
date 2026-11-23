@@ -28,6 +28,7 @@ jobs:
           python -m pip install cryptography pyinstaller
           python rise-bridge/tests/test_app.py
           python rise-bridge/tests/test_memberid.py
+          python rise-bridge/tests/test_lobby.py
           python -m PyInstaller --noconfirm --onefile --windowed --name RiseBridge --paths rise-bridge --paths rise-bridge/tools rise-bridge/rise_bridge_app.py
       - name: Package
         shell: pwsh

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse, base64, os, socket, struct, sys, threading, time, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from bridge import gamemsg, hellomap, hublink, joinmsgs
+from bridge import gamemsg, hellomap, hublink, joinmsgs, lobby, wire
 from bridge.station import Station
 
 CON_REQ, CON_ANS = b"SteamConReq\x00", b"SteamConAns\x00"
+# The Steam ID the DLL gives the Switch host (src/bridge.cpp kHostId); the lobby answers name the host by it
+HOST_SID = 0x0110000100000000 | 0x4B1D0000
 
 class Daemon:
     def __init__(self, server, room, name, port, log=print):
@@ -14,6 +16,7 @@ class Daemon:
         self.dll = None
         self.hubs = []
         self.link = self.station = None
+        self.pc_lobby = self.sw_lobby = None
         here = os.path.dirname(os.path.abspath(__file__))
         self.hello_map = hellomap.find(os.getcwd(), os.path.join(here, ".."), here, os.path.dirname(os.path.abspath(sys.argv[0])))
         self.log("hello map: %s" % ("loaded" if self.hello_map else "none"))
@@ -48,6 +51,7 @@ class Daemon:
                 self.link, self.station = link, st
                 for _ in range(80):
                     if st.state == "in":
+                        self._lobbies(st)
                         self.reply("JOINED")
                         return
                     time.sleep(0.1)
@@ -61,11 +65,31 @@ class Daemon:
             self.log("join failed: %s" % e)
             self.reply("ERR %s" % e)
 
+    def _lobbies(self, st) -> None:
+        """The lobby channel isn't passed through: the bridge is the PC's host there, and the Switch host's joiner
+        (bridge/lobby.py). A thread sends the PC host's keep-alives while this station lasts."""
+        self.pc_lobby = lobby.PcLobby(HOST_SID, lambda m: self.reply("RECV " + joinmsgs.steam_wrap(m).hex()), self.log)
+        self.sw_lobby = lobby.SwitchLobby(lambda m: st.send_game(st._host()[0], m), self.log)
+
+        def ticks(pc=self.pc_lobby):
+            while self.station is st and self.pc_lobby is pc:
+                time.sleep(0.5)
+                try:
+                    pc.tick()
+                except Exception as e:
+                    self.log("lobby keep-alive: %s" % e)
+        threading.Thread(target=ticks, daemon=True).start()
+
     def from_switch(self, addr: int, payload: bytes) -> None:
+        p = wire.decode(payload)
+        if p is not None and p[:2] == wire.LOBBY:
+            if self.sw_lobby:
+                self.sw_lobby.from_host(p)
+            return
         self.log("Switch host -> game: %d bytes" % len(payload))
         fixed = gamemsg.to_pc(payload)
         if fixed != payload:
-            self.log("the host's platform message made the way a PC sends it (0x20 -> 0x01), same identity %s"
+            self.log("the host's platform message made the way a PC sends it, same identity %s"
                      % gamemsg.identity(fixed).hex())
             payload = fixed
         self.reply("RECV " + joinmsgs.steam_wrap(payload).hex())
@@ -77,11 +101,15 @@ class Daemon:
             return
             
         game = joinmsgs.steam_unwrap(data)
+        p = wire.decode(game) if game else None
+        if p is not None and p[:2] == wire.LOBBY:
+            if self.pc_lobby:
+                self.pc_lobby.from_pc(p)
+            return
         self.log("game -> Switch host: %d bytes" % (len(game) if game else 0))
-        
-        # The game's member messages (0203, 0302) go to the host as they are. They used to be replaced with made-up
-        # Switch-style ones, because the host rejected the PC's: the platform message had told the host another identity
-        # (see gamemsg.set_platform), so nothing the PC sent afterwards matched it.
+
+        # Everything else goes to the host as it is, the platform message with the Switch's platform byte (and the
+        # same identity: every member message the PC sends afterwards carries it).
         st = self.station
         if game is None or st is None or st.state != "in":
             return
@@ -92,7 +120,7 @@ class Daemon:
                 game = self.hello_map.message_for(host_mac)
             fixed = gamemsg.to_switch(game)
             if fixed != game:
-                self.log("the game's platform message made the way a Switch sends it (0x01 -> 0x20), same identity %s"
+                self.log("the game's platform message made the way a Switch sends it, same identity %s"
                          % gamemsg.identity(fixed).hex())
                 game = fixed
             st.send_game(host, game)
@@ -116,6 +144,7 @@ class Daemon:
                 time.sleep(0.2)
             self.link.leave()
             self.link = self.station = None
+            self.pc_lobby = self.sw_lobby = None
 
     def run(self) -> None:
         self.log("bridge daemon on 127.0.0.1:%d" % self.sock.getsockname()[1])

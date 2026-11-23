@@ -42,6 +42,14 @@ helper:
 
 The helper's log now says `same identity <8 hex digits>` when it converts a platform message.
 
+## 2026-11-23, second round: the lobby
+
+The member exchange worked, but PC online and Switch Local Play run different lobbies (`analysis/LOBBY.md`), so each
+side waited for something the other never sends. The helper now plays the PC host's lobby toward the PC game and a
+Switch joiner's toward the port host. The PC game's check of the Switch host's Steam ticket passes in the DLL.
+In the helper's log: `[lobby] the host sent its room`, `[lobby] the PC asked to join: answered as its host`, then
+`[lobby] the PC sent its ticket`. In `rise_netlog.txt`: `BeginAuthSession for the Switch host's ID: answered OK`.
+
 ## What the log lines mean
 
 Lines starting `bridge:` in `rise_netlog.txt` show each step:

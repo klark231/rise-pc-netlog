@@ -37,9 +37,9 @@ def test_gamemsg():
     host = bytes.fromhex("076ac6a6a7a5a7862f0a2b5c")        # the Switch host's 12-byte message: 00 01 03 01 20 89ac8dfa
     assert g.parse(host)[1].hex() == "000103012089ac8dfa"
     pc = g.to_pc(host)
-    # platform 20 -> 01, and the id bytes XORed with 0x21 so the identity stays the same (id ^ 23 on Switch, id ^ 02 on PC)
+    # payload 01 02 02 21 <id> -> 01 02 02 00 <id> (bridge/wire.py): the same identity
     assert g.parse(pc)[1].hex() == "0001030101a88dacdb"
-    assert g.identity(pc) == g.identity(host) == bytes.fromhex("aa8faed9")
+    assert g.identity(pc) == g.identity(host) == bytes.fromhex("a9252177")
     assert g.to_switch(pc) == host and g.to_switch(host) == host      # and back
     assert g.to_pc(pc) == pc and g.to_pc(b"\x00" * 15) == b"\x00" * 15
     print("ok test_gamemsg")
