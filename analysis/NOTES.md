@@ -170,3 +170,63 @@ each) and moves `0x68` payloads between the two. Open questions:
 4. What the `SearchKey`s are (quest, rank, region…), to fill them for a Switch room.
 5. What `SteamConReq` / `SteamConAns` lead to on the PC (whether anything else is checked: `IsEnableAuth` = true
    suggests Steam's auth tickets; with OnlineFix those may be faked already).
+
+## 5. Joining two lobbies (PC capture of Nov 24)
+
+One session: host a lobby and leave it, then search, join a lobby with one player, leave, join one with two.
+
+**SearchKeys.** Each is a value plus 2^31 (so -2147483648 is 0, -2147483647 is 1), the usual way of making a signed
+key sort like an unsigned one. Across three lobbies:
+
+| key | value | what |
+|---|---|---|
+| 0 | 1 | always 1 (lobby kind?) |
+| 1, 2, 7–10 | 0 | always 0 here, and the search asks for 0 on 7–10: filters nobody set (quest, target…?) |
+| 3 | 4, 999, 335 | the host's Hunter Rank |
+| 4, 5 | 1, 999 | the room's HR range, lowest and highest |
+| 6 | 965861185 | the same in every lobby, and the search asks for it exactly: the game's network version |
+| 11 | 0, 999, 123 | the host's Master Rank |
+| 12, 13 | 0, 999 | the room's MR range |
+| 14 | 965861184 | key 6 minus one |
+
+The search: `SearchKey6` equal to its own (so only the same network version is listed), `SearchKey7`–`10` equal to 0,
+the host's HR (3) and MR (11) within 1..999 / 0..999, and the room's ranges (4, 5 and 12, 13) including the searcher's
+own HR and MR. Comparison codes are Steam's: -2 less or equal, 0 equal, 2 greater or equal, 3 not equal.
+
+For the bridge: a Switch room listed on PC needs key 6 set to the PC's value (the Switch's own network version is to be
+compared: if it differs, the two games may not be meant to talk, and the bridge would have to translate or refuse).
+
+**BinaryData** (88–108 bytes): `4f 28 18 b9`, zeros, `00 04`, then the hunter's name (u16 byte length, UTF-16), then a
+block with the HR (`00 04 00 04`, `03 e7` = 999 in the 999 rooms), `00 01 00 0b 00 0d`, then the Steam name (u16 byte
+length, UTF-16) and the same HR block again. That is, a list of members, each with a hunter name, ranks and an account
+name; on the Switch the account name would be the console's user nickname.
+
+**Steam's auth tickets travel inside the game's messages.** On joining, after `SteamConReq` / `SteamConAns`:
+
+```
+< host   309 bytes, kind 03 02      (the host's 234-byte ticket, obfuscated like any game message)
+BeginAuthSession host, 234 bytes -> 0 (OK)
+GetAuthSessionTicket -> 234 bytes
+> host   275 bytes, kind 03 02      (the joiner's)
+SetLobbyMemberData "Index" = <slot>
+```
+
+Then the same with every other member (a full mesh: each pair exchanges tickets), `EndAuthSession` for each on leaving.
+The ~480-byte messages of kind `04 06` from the host follow at once (its player data, as before), and the joiner sends
+its own in 240–430-byte pieces.
+
+For the bridge: the PC-side DLL answers `BeginAuthSession` for bridged players itself (they have no Steam ticket), and
+the bridge drops the `03 02` ticket messages going to the Switch side and makes up the ones a PC player expects from a
+Switch player. What the Switch sends in that place on joining is still to be lined up (a Switch capture of the same
+steps).
+
+Note: this capture's Steam client library is `OnlineFix64.dll`, not Steam's. Lobbies and messages behave as Steam's
+API says, but the tickets here are OnlineFix's; the bridge shouldn't depend on either.
+
+**The Switch's advertise data next to it** (a port capture of the same night, two rooms, no AES key logged): from 0x10
+it is the same layout, member by member: the hunter's name, then the HR block (`00 04 00 01` for an HR 1 hunter,
+`00 04 01 51` for HR 337, with `00 83` = MR 131 further on). Where PC has `00 04 00 01 00 0b 00 0d` and the Steam name,
+the Switch has `00 04 00 00` and no name: that second block is the platform account, empty on the Switch. The 16 bytes
+in front (session ID, zeros, `08 10 00 00`, then 4 bytes) change with every room, so the Switch's advertise data
+carries nothing like PC's `SearchKey6` network version; if the two have a version check, it's in the join messages.
+
