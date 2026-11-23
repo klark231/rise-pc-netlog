@@ -267,3 +267,61 @@ So the bridge's job at join time is clear:
 Still to do: line up the `04 06` player data (PC's pieces run 30–40 bytes longer, probably the account fields), and
 what the PC sends in a quest that the Switch doesn't.
 
+## 7. A quest on PC (capture of Nov 24, three players) next to the port's
+
+PC: join a lobby of two, then the quest lobby (`CreateLobby type 3` when posting one; `Attribute` and `Group` set
+again on departure), hunt, return. The port capture of section 6 has a quest between two players.
+
+Messages per minute during the hunt, by kind:
+
+| | `04 06` | `01 03` | `03 02` | `02 03` |
+|---|---|---|---|---|
+| PC, 3 players | ~5000 | ~950–1400 | ~940–1400 | a few |
+| Switch, 2 players | ~800–1300 | ~420 | almost none | a few |
+
+- `04 06` is the same traffic on both, with the same inner layout (sizes 25, 34–36, 48, 56, 68, 486…; the 486-byte
+  `01 d6 0b` ones from the host on both). Scaled by players it's the same rate: nothing about the hunt itself looks
+  different between the versions so far.
+- **PC sends a `03 02` for nearly every `01 03`**, 16 or 24 bytes, both layers off: the sender's byte, then counters
+  (`b6 00 c2`, `b6 00 c2 00 c2 00 04 03 00 07 00`) that go up per peer. That looks like the game's own acknowledgements:
+  on the Switch, Pia acknowledges and resends itself (its `0x58` messages, every ~200 ms, carry counters), so the game
+  sends none there. On PC, Steam's `SendMessageToUser` is unreliable as the game uses it, so the game does it.
+
+For the bridge, the same rule as at join time: PC → Switch drops the `03 02` acknowledgements; Switch → PC makes them
+up for each Switch player as it delivers that player's `01 03` messages. That needs their counters worked out: what
+each number counts, against which `01 03` (to do next, from these two captures).
+
+## 8. The `03 02` / `02 03` messages: the game's own reliable channel, on both
+
+Both layers off, they read plainly, and they're the same on the two platforms:
+
+```
+02 03 | from (u32) | to (u32) | 00 00 00 01 00 01 01          21 bytes: opens the channel (both ends send one)
+02 03 | from | to | u16 n                                     16 bytes
+03 02 | from | to | u16 n                                     16 bytes
+03 02 | from | to | u16 n | u16 m | 00 04 03 00 07 00          24 bytes
+03 02 | from | to | 00 00 00 01 00 10 03 00 01 01 + Steam ID + 4 bytes + 00     36 bytes, PC only
+03 02 | from | to | … ea 00 ea + 234-byte Steam ticket …      275/309 bytes, PC only
+```
+
+`from` and `to` are 32-bit IDs the game picks per player (random, the same for a player towards everyone; not Pia's
+station keys and not the MAC). In the 24-byte one, `n` is the sender's own count and `m` the other's count plus one
+(each answers with the next one it expects): the counters go up by one each round, ~2 a second per pair.
+
+- **Switch:** these go only around joining (the opening, then `n` = 1 repeated every ~0.5 s until the other end has
+  it) and stop. Pia keeps the connection alive itself.
+- **PC:** the same opening, the ticket exchange, then the 16/24-byte rounds keep going at ~2 Hz for the whole session:
+  the game's own keep-alive, since Steam's messages don't have Pia's.
+
+`01 03` (8 and 9 bytes) is a separate ping on both: `03 n 00` asked and `03 n 01` answered, `04 n` a counter.
+
+**The bridge's rules, complete for joining and hunting:**
+
+| PC → Switch | Switch → PC |
+|---|---|
+| drop `03 02` with a Steam ID (36) or ticket (275/309) | make both up for each Switch player (an ID the PC-side DLL gives out, a dummy ticket the DLL accepts) |
+| drop the keep-alive rounds after the opening | answer the PC's rounds for each Switch player (its own `n`, the PC's `n` + 1) and start its own |
+| everything else as it is | everything else as it is |
+
+The 32-bit `from`/`to` IDs pass through untouched: each side already uses the other's as they come.
+
