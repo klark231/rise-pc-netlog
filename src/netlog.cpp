@@ -327,7 +327,10 @@ const char* __fastcall get_member_data(void* self, uint64_t lobby, uint64_t memb
 void __fastcall set_member_data(void* self, uint64_t lobby, const char* key, const char* value) {
     log_line("SetLobbyMemberData lobby %llu \"%s\" = \"%s\"\n", static_cast<unsigned long long>(lobby), key ? key : "",
              value ? value : "");
-    if (bridge::fake_lobby(lobby)) return;
+    if (bridge::fake_lobby(lobby)) {
+        bridge::set_member_data(lobby, key, value);
+        return;
+    }
     g_set_member_data(self, lobby, key, value);
 }
 

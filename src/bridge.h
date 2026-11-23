@@ -23,6 +23,7 @@ int member_count(uint64_t lobby);
 uint64_t member_by_index(uint64_t lobby, int i, uint64_t me);
 uint64_t owner(uint64_t lobby);
 const char* member_data(uint64_t lobby, uint64_t member, const char* key);
+void set_member_data(uint64_t lobby, const char* key, const char* value);  // the game's own, kept for member_data
 
 // ISteamNetworkingMessages
 void send_to_host(const void* data, uint32_t size, int channel);

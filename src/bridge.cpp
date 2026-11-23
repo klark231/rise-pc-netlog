@@ -370,10 +370,37 @@ uint64_t member_by_index(uint64_t, int i, uint64_t me) {
     return i == 0 ? host_id() : me;
 }
 uint64_t owner(uint64_t) { return host_id(); }
+// What the game set as its own member data. Steam hands it back to everyone, the game included, and the game waits for
+// that: after SetLobbyMemberData("Index", "3") it read its own Index every frame until it said 3 (2026-11-24 test,
+// stuck after joining with only pings going both ways).
+std::map<std::string, std::string> g_own_member;
+
 const char* member_data(uint64_t, uint64_t member, const char* key) {
-    L("GetLobbyMemberData(%s) for %s", key ? key : "", member == host_id() ? "the host" : "us");
-    if (key && !strcmp(key, "Index")) return member == host_id() ? "0" : "1";
+    const bool host = member == host_id();
+    static std::set<std::string> logged;
+    std::lock_guard lock(g_m);
+    if (!host && key) {
+        auto it = g_own_member.find(key);
+        if (it != g_own_member.end()) return it->second.c_str();
+    }
+    if (logged.insert(std::string(host ? "host " : "us ") + (key ? key : "")).second)
+        L("GetLobbyMemberData(%s) for %s", key ? key : "", host ? "the host" : "us");
+    if (key && !strcmp(key, "Index")) return host ? "0" : "1";
     return "";
+}
+
+void set_member_data(uint64_t lobby, const char* key, const char* value) {
+    if (!key) return;
+    std::lock_guard lock(g_m);
+    g_own_member[key] = value ? value : "";
+    L("SetLobbyMemberData(%s, %s): kept as ours, LobbyDataUpdate queued", key, value ? value : "");
+    // LobbyDataUpdate_t for our member (lobby, member, success), as Steam sends when member data changes
+    const uint64_t me = g_own_id ? g_own_id() : 0;
+    std::vector<uint8_t> upd(20, 0);
+    memcpy(upd.data(), &lobby, 8);
+    memcpy(upd.data() + 8, &me, 8);
+    upd[16] = 1;
+    g_cbs.push_back({505, upd});
 }
 
 void send_to_host(const void* data, uint32_t size, int channel) {
