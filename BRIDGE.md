@@ -98,3 +98,19 @@ vectors for the C++.
 
 Joining works both ways now, and the PC shows the Switch player's hunter walking around, but the Switch side never
 shows the PC's. See `analysis/NOTES.md`, section 9. `probe/` has the script that finds out where the Switch game stops.
+
+## 2026-11-25: quests
+
+With the PC's player slot fixed (the bridge's join answer gave it slot 3 while the Switch had it as player 1), both
+sides see each other's hunters. Quests didn't work either way, because the two versions do them differently:
+
+- PC online: posting a quest opens a quest session of its own, a Steam lobby (`CreateLobby type 3`). A joiner asks the
+  poster to enter the room, and the answer carries that lobby's ID (`snow.LobbyManager.QuestIdentifier._sessionID`, a
+  string), which it joins. Nothing else gives the ID away: no invite, no lobby data, and the messages it travels in are
+  the game's packed ones (not plain or bit-aligned anywhere in the captures).
+- Switch Local Play: the quest stays in the room's session.
+
+The game has both ways in it, chosen by `snow.SnowSessionManager.IsInternet` / `isLocalnet`. `rise_crossplay_quest.lua`
+(installed by RiseBridge into `reframework/autorun` along with the plugin) has the PC take the Local Play way once
+it's in a room. Its checkbox is in REFramework's menu (Script Generated UI → Crossplay quests). It logs `[xquest]`
+lines: the quest calls and the session IDs the quests carry.

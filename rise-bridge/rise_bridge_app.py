@@ -17,6 +17,7 @@ FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else HERE
 GAME_EXE, FLAG, DLL = "MonsterHunterRise.exe", "rise_bridge.txt", "dinput8.dll"
 PLUGIN = "rise_crossplay.dll"    # the same code built as a REFramework plugin (reframework/plugins)
+QUEST_LUA = "rise_crossplay_quest.lua"  # quests the Local Play way while in a Switch room (reframework/autorun)
 CAL_FLAG, HELLO = "rise_bridge_calibrate.txt", "rise_hello.txt"
 DEFAULTS = {"server": "meoli.viewdns.net", "key": "", "name": "PCBridge", "game_dir": ""}
 CONFIG = os.path.join(APP_DIR, "RiseBridge.json")
@@ -102,6 +103,10 @@ def plugin_path(game_dir):
     return os.path.join(game_dir, "reframework", "plugins", PLUGIN)
 
 
+def quest_path(game_dir):
+    return os.path.join(game_dir, "reframework", "autorun", QUEST_LUA)
+
+
 def check_game_dir(game_dir):
     return bool(game_dir) and os.path.isfile(os.path.join(game_dir, GAME_EXE))
 
@@ -129,7 +134,7 @@ def set_calibrate(game_dir, on):
     return "calibration OFF"
 
 
-def install(game_dir, dll_src=None, plugin_src=None):
+def install(game_dir, dll_src=None, plugin_src=None, quest_src=None):
     """Put the DLL in and switch bridge mode on. Returns a list of log lines.
 
     With REFramework (its own dinput8.dll) the DLL goes in as a plugin, reframework/plugins/rise_crossplay.dll, so
@@ -138,6 +143,7 @@ def install(game_dir, dll_src=None, plugin_src=None):
         raise ValueError("%s not found in %r" % (GAME_EXE, game_dir))
     if uses_reframework(game_dir):
         msgs = _install_plugin(game_dir, plugin_src if plugin_src is not None else find_dll(PLUGIN))
+        msgs += _install_quest(game_dir, quest_src if quest_src is not None else find_dll(QUEST_LUA))
     else:
         msgs = _install_dinput8(game_dir, dll_src if dll_src is not None else find_dll())
     open(os.path.join(game_dir, FLAG), "w").close()
@@ -176,6 +182,17 @@ def _install_plugin(game_dir, src):
     return msgs
 
 
+def _install_quest(game_dir, src):
+    """The quest script (REFramework runs it): without it a quest between the PC and the Switch can't be joined"""
+    dst = quest_path(game_dir)
+    if not src:
+        return ["no %s next to the app: quests between the PC and the Switch won't work" % QUEST_LUA]
+    if os.path.isfile(dst) and _same(src, dst):
+        return ["reframework/autorun/%s is already up to date" % QUEST_LUA]
+    _copy(src, dst)
+    return ["copied %s into reframework/autorun" % QUEST_LUA]
+
+
 def _install_dinput8(game_dir, src):
     msgs = []
     dst = os.path.join(game_dir, DLL)
@@ -212,6 +229,9 @@ def remove(game_dir, with_dll=False):
         if os.path.isfile(plugin_path(game_dir)):
             os.remove(plugin_path(game_dir))
             msgs.append("removed reframework/plugins/%s" % PLUGIN)
+        if os.path.isfile(quest_path(game_dir)):
+            os.remove(quest_path(game_dir))
+            msgs.append("removed reframework/autorun/%s" % QUEST_LUA)
         dll = os.path.join(game_dir, DLL)
         if os.path.isfile(dll) and not uses_reframework(game_dir):
             os.remove(dll)

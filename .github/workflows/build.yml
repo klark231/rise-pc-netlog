@@ -36,6 +36,7 @@ jobs:
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item build/Release/dinput8.dll out/
           Copy-Item build/Release/rise_crossplay.dll out/
+          Copy-Item quest/rise_crossplay_quest.lua out/
           New-Item -ItemType Directory -Force out/probe | Out-Null
           # The port's Add a mod takes a zip laid out like the game folder
           New-Item -ItemType Directory -Force probe-zip/reframework/autorun | Out-Null
