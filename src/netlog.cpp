@@ -298,6 +298,67 @@ uint64_t __fastcall create_lobby(void* self, int type, int max) {
     return g_create_lobby(self, type, max);
 }
 
+// The rest of the lobby calls a quest could go through, logged: how a PC player learns the lobby of a quest someone
+// posted is still unknown (in a PC capture the joiner called JoinLobby on it with no search before and no message
+// carrying its ID). InviteUserToLobby 16, GetLobbyDataByIndex 22, RequestLobbyData 28, SetLobbyGameServer 29,
+// SetLobbyType 33, SetLobbyJoinable 34, SetLobbyOwner 36, SetLinkedLobby 37.
+using InviteUser = bool(__fastcall*)(void*, uint64_t, uint64_t);
+using DataByIndex = bool(__fastcall*)(void*, uint64_t, int, char*, int, char*, int);
+using RequestData = bool(__fastcall*)(void*, uint64_t);
+using SetGameServer = void(__fastcall*)(void*, uint64_t, uint32_t, uint16_t, uint64_t);
+using SetLobbyInt = bool(__fastcall*)(void*, uint64_t, int);
+using SetLobbyBool = bool(__fastcall*)(void*, uint64_t, bool);
+using SetLobbyId = bool(__fastcall*)(void*, uint64_t, uint64_t);
+InviteUser g_invite_user = nullptr;
+DataByIndex g_data_by_index = nullptr;
+RequestData g_request_data = nullptr;
+SetGameServer g_set_game_server = nullptr;
+SetLobbyInt g_set_lobby_type = nullptr;
+SetLobbyBool g_set_joinable = nullptr;
+SetLobbyId g_set_owner = nullptr, g_set_linked = nullptr;
+
+bool __fastcall invite_user(void* self, uint64_t lobby, uint64_t user) {
+    log_line("InviteUserToLobby lobby %llu user %llu\n", static_cast<unsigned long long>(lobby),
+             static_cast<unsigned long long>(user));
+    if (bridge::fake_user(user)) {  // (the stand-in for the Switch host: Steam doesn't know it)
+        log_line("bridge: the invite for the Switch host kept from Steam\n");
+        return true;
+    }
+    return g_invite_user(self, lobby, user);
+}
+bool __fastcall data_by_index(void* self, uint64_t lobby, int i, char* key, int key_cap, char* value, int value_cap) {
+    const bool ok = g_data_by_index(self, lobby, i, key, key_cap, value, value_cap);
+    if (ok) log_read("GetLobbyDataByIndex", lobby, 0, key, value);
+    return ok;
+}
+bool __fastcall request_data(void* self, uint64_t lobby) {
+    log_line("RequestLobbyData %llu\n", static_cast<unsigned long long>(lobby));
+    return g_request_data(self, lobby);
+}
+void __fastcall set_game_server(void* self, uint64_t lobby, uint32_t ip, uint16_t port, uint64_t server) {
+    log_line("SetLobbyGameServer lobby %llu ip %08x port %u server %llu\n", static_cast<unsigned long long>(lobby), ip,
+             port, static_cast<unsigned long long>(server));
+    g_set_game_server(self, lobby, ip, port, server);
+}
+bool __fastcall set_lobby_type(void* self, uint64_t lobby, int type) {
+    log_line("SetLobbyType lobby %llu type %d\n", static_cast<unsigned long long>(lobby), type);
+    return g_set_lobby_type(self, lobby, type);
+}
+bool __fastcall set_joinable(void* self, uint64_t lobby, bool joinable) {
+    log_line("SetLobbyJoinable lobby %llu %d\n", static_cast<unsigned long long>(lobby), joinable ? 1 : 0);
+    return g_set_joinable(self, lobby, joinable);
+}
+bool __fastcall set_owner(void* self, uint64_t lobby, uint64_t owner) {
+    log_line("SetLobbyOwner lobby %llu owner %llu\n", static_cast<unsigned long long>(lobby),
+             static_cast<unsigned long long>(owner));
+    return g_set_owner(self, lobby, owner);
+}
+bool __fastcall set_linked(void* self, uint64_t lobby, uint64_t dependent) {
+    log_line("SetLinkedLobby lobby %llu dependent %llu\n", static_cast<unsigned long long>(lobby),
+             static_cast<unsigned long long>(dependent));
+    return g_set_linked(self, lobby, dependent);
+}
+
 uint64_t __fastcall join_lobby(void* self, uint64_t lobby) {
     log_line("JoinLobby %llu\n", static_cast<unsigned long long>(lobby));
     if (bridge::fake_lobby(lobby)) return bridge::join(lobby);
@@ -451,6 +512,14 @@ void wrap_matchmaking(void* m) {
     wrap_slot(m, 25, &set_member_data, g_set_member_data);
     wrap_slot(m, 26, &send_chat, g_send_chat);
     wrap_slot(m, 27, &get_chat_entry, g_get_chat_entry);
+    wrap_slot(m, 16, &invite_user, g_invite_user);
+    wrap_slot(m, 22, &data_by_index, g_data_by_index);
+    wrap_slot(m, 28, &request_data, g_request_data);
+    wrap_slot(m, 29, &set_game_server, g_set_game_server);
+    wrap_slot(m, 33, &set_lobby_type, g_set_lobby_type);
+    wrap_slot(m, 34, &set_joinable, g_set_joinable);
+    wrap_slot(m, 36, &set_owner, g_set_owner);
+    wrap_slot(m, 37, &set_linked, g_set_linked);
     if (bridge::on()) {
         wrap_slot(m, 12, &by_index, g_by_index);
         wrap_slot(m, 17, &num_members, g_num_members);
@@ -575,6 +644,26 @@ FreeLastCallback g_free_last_callback = nullptr;
 int g_last_user = 1;
 bool g_fake_callback = false;
 
+// Steam's own callbacks the game gets: each kind once, and the lobby ones in full (a quest's lobby could come to the
+// game as an invite, 503). LobbyEnter 504, LobbyDataUpdate 505, LobbyChatUpdate 506, LobbyChatMsg 507, LobbyCreated
+// 513, GameLobbyJoinRequested 333, GameRichPresenceJoinRequested 337.
+void note_callback(const CallbackMsg& m) {
+    static std::mutex seen_m;
+    static std::set<int> seen;
+    static int detailed = 0;
+    const int id = m.id;
+    const bool lobby = id == 503 || id == 504 || id == 506 || id == 507 || id == 513 || id == 333 || id == 337 ||
+                       (id == 505 && detailed < 100);
+    {
+        std::lock_guard lock(seen_m);
+        if (!seen.insert(id).second && !lobby) return;
+        if (lobby && detailed++ > 400) return;
+    }
+    char hex[3 * 64 + 1] = {};
+    for (int i = 0; m.param && i < m.size && i < 64; i++) snprintf(hex + 3 * i, 4, "%02x ", m.param[i]);
+    log_line("Steam callback %d (%d bytes) %s\n", id, m.size, lobby ? hex : "");
+}
+
 bool __cdecl bget_callback(int pipe, CallbackMsg* msg) {
     static bool first = true;
     if (first) {
@@ -595,7 +684,10 @@ bool __cdecl bget_callback(int pipe, CallbackMsg* msg) {
     }
     g_fake_callback = false;
     const bool ok = g_bget_callback(pipe, msg);
-    if (ok && msg) g_last_user = msg->user;
+    if (ok && msg) {
+        g_last_user = msg->user;
+        note_callback(*msg);
+    }
     return ok;
 }
 
