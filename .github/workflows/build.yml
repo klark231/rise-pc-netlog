@@ -37,7 +37,10 @@ jobs:
           Copy-Item build/Release/dinput8.dll out/
           Copy-Item build/Release/rise_crossplay.dll out/
           New-Item -ItemType Directory -Force out/probe | Out-Null
-          Copy-Item probe/crossplay-probe.zip out/probe/
+          # The port's Add a mod takes a zip laid out like the game folder
+          New-Item -ItemType Directory -Force probe-zip/reframework/autorun | Out-Null
+          Copy-Item probe/crossplay_probe.lua probe-zip/reframework/autorun/
+          Compress-Archive -Path probe-zip/reframework -DestinationPath out/probe/crossplay-probe.zip -Force
           Copy-Item probe/crossplay_probe.lua out/probe/
           Copy-Item dist/RiseBridge.exe out/
           Copy-Item BRIDGE.md out/

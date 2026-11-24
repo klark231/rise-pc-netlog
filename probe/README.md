@@ -9,7 +9,8 @@ The same script runs on both:
 - **PC (REFramework):** copy `crossplay_probe.lua` into `reframework/autorun` in the game folder. The lines go to
   REFramework's log, `re2_framework_log.txt` in the game folder.
 - **Android port** (a build with the Lua runtime, which the netlog build is): Settings → Mods & cheats → **Add a mod**,
-  and pick `crossplay-probe.zip`. The lines go to `log.txt`.
+  and pick `crossplay-probe.zip` (in the build's `probe` folder; it's
+  `crossplay_probe.lua` in `reframework/autorun`). The lines go to `log.txt`.
 
 Every line starts with `[xprobe]`:
 
