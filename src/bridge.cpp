@@ -93,6 +93,7 @@ DWORD g_list_deadline = 0;
 int g_channel = kDefaultChannel;
 std::map<std::string, std::string> g_strings;  // returned const char*s point in here (std::map nodes don't move)
 bool g_in_room = false;                         // joined a Switch session (JOINED) and not left it
+uint64_t g_room_lobby = 0;                      // that room's lobby
 uint64_t g_quest_owner = 0;                     // who made the quest lobby: the PC itself, or the Switch host
 std::map<std::string, std::string> g_quest_data;  // what the game set on the quest lobby
 
@@ -180,6 +181,7 @@ void on_datagram(const std::string& s) {
         std::lock_guard lock(g_m);
         L("daemon: joined the Switch session");
         g_in_room = true;
+        g_room_lobby = g_join_lobby;
         if (g_join_handle) lobby_entered(g_join_lobby, 1);
         g_join_handle = 0;
     } else if (s.compare(0, 3, "ERR") == 0) {
@@ -449,6 +451,13 @@ const char* member_data(uint64_t lobby, uint64_t member, const char* key) {
     const bool host = member == host_id();
     static std::set<std::string> logged;
     std::lock_guard lock(g_m);
+    // In a quest the PC keeps its slot in the room, as a Switch player does in Local Play: there the quest is the
+    // room's session. As the quest lobby's maker the PC set Index 0, the Switch host's slot; the Switch then took the
+    // host for its own player, found it wasn't in the quest and retired (2026-11-25, 03:32).
+    if (!host && key && lobby == kQuestLobby && !strcmp(key, "Index")) {
+        auto it = g_own_member.find({g_room_lobby, key});
+        if (it != g_own_member.end()) return it->second.c_str();
+    }
     if (!host && key) {
         auto it = g_own_member.find({lobby, key});
         if (it != g_own_member.end()) return it->second.c_str();

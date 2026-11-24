@@ -25,6 +25,11 @@ def test_pc_lobby():
     pc.tick()
     ch, s, r, ack, recs = wire.parse(wire.decode(out[-1]))
     assert [q for q, _ in recs] == [4] and recs[0][1] == lobby.PING
+    # the PC joins a quest's lobby: numbering from 1 again, answered again, with no ticket
+    pc.from_pc(wire.build(wire.LOBBY, me, host, 0, [(1, join)]))
+    ch, s, r, ack, recs = wire.parse(wire.decode(out[-1]))
+    assert ack == 1 and [b[:3].hex() for _, b in recs] == ["030002", "030008", "030005"] and len(recs[1][1]) == 21
+    assert struct.unpack_from(">Q", recs[0][1], 3)[0] == 1
     print("ok test_pc_lobby")
 
 

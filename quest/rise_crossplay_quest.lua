@@ -1,4 +1,4 @@
--- Crossplay quests: what each game does with a quest in a Switch Local Play room. Logs only; it changes nothing.
+-- Crossplay quests: what each game does with a quest in a Switch Local Play room.
 --
 -- On PC online a quest has a session of its own (a Steam lobby); in Switch Local Play it stays in the room's session.
 -- The PC plugin (rise_crossplay.dll) keeps the PC's quest in the Switch session. This script shows the game's side of
@@ -8,6 +8,7 @@
 --   * the session ID each quest carries (QuestIdentifier._sessionID): on PC a short code for its lobby, on the Switch
 --     empty
 -- Lines start with [xquest]: re2_framework_log.txt on PC, log.txt on the port.
+-- On PC it also lets the PC join a Switch quest (at the end).
 --
 -- 2026-11-25: having the game take its Local Play way (IsInternet / isLocalnet answered for it) did nothing: neither
 -- is asked when a quest is posted or joined.
@@ -96,6 +97,40 @@ for _, tn in ipairs({ "snow.LobbyManager", mgr_name }) do
                 end, nil)
             end
         end
+    end
+end
+
+-- The PC joining a Switch quest. A Switch quest has no session ID (Local Play has no session of its own), and with
+-- an empty one the PC gave up before asking Steam for anything. It gets the ID of the plugin's quest lobby instead,
+-- which stands for the Switch session the PC is already in: this is the ID the PC itself made for that lobby
+-- (rise_crossplay.dll's kQuestLobby, 0x01860000B1D60020) on 2026-11-25, and the PC reads its lobby back out of it.
+-- Only on PC (the port has no quest sessions to join).
+local QUEST_LOBBY_ID = "LYAfTFFEXeFFEAJG"
+local on_pc = try(function() return package.config:sub(1, 1) == "\\" end) or false
+local kept = nil
+local join = sdk.find_type_definition(mgr_name)
+join = join and join:get_method("reqSessionJoinFromSessionID")
+if on_pc and join then
+    local types = try(join.get_param_types, join) or {}
+    local at = nil
+    for i, t in ipairs(types) do
+        if try(t.get_full_name, t) == "System.String" then at = 2 + i break end
+    end
+    if at then
+        pcall(sdk.hook, join, function(args)
+            local s = try(sdk.to_managed_object, args[at])
+            local id = s and try(s.call, s, "ToString") or ""
+            if id ~= "" then return end
+            if kept == nil then
+                kept = sdk.create_managed_string(QUEST_LOBBY_ID)
+                if kept then try(kept.add_ref, kept) end
+            end
+            if kept then
+                args[at] = sdk.to_ptr(kept)
+                say("joining a Switch quest: its empty session ID swapped for the plugin's quest lobby")
+            end
+        end, nil)
+        say("reqSessionJoinFromSessionID: Switch quests joined through the plugin's quest lobby")
     end
 end
 

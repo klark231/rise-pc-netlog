@@ -50,6 +50,7 @@ class PcLobby:
         self.host_id = self.pc_id = None   # the 4-byte ids of the two games (from the platform messages)
         self.next_seq, self.unacked, self.last_rx = 1, [], 0
         self.answered = False
+        self.quest = False  # answering a quest lobby's join (see from_pc)
         self.lock = threading.Lock()
 
     def ids(self, host_id: bytes, pc_id: bytes) -> None:
@@ -76,6 +77,11 @@ class PcLobby:
             # what the PC has acknowledged goes (record numbers wrap at 16 bits)
             self.unacked = [(s, r) for s, r in self.unacked if 0 < ((s - ack) & 0xFFFF) < 0x8000]
             for seq, r in recs:
+                if seq == 1 and self.answered and r[:3] == bytes([3, 0, T_JOIN]):
+                    # A join from the start again: the PC joining a quest's lobby (the plugin's, standing for this same
+                    # session). Its numbering starts over, as it did between two PCs.
+                    self.next_seq, self.unacked, self.last_rx = 1, [], 0
+                    self.answered, self.quest = False, True
                 if ((seq - self.last_rx) & 0xFFFF) == 0 or ((seq - self.last_rx) & 0xFFFF) > 0x8000:
                     continue  # had it already
                 self.last_rx = seq
@@ -93,11 +99,14 @@ class PcLobby:
             # L_Pl1_..., never got the state the PC sent for L_Pl3_... and stayed invisible), the host's Steam ID, 4
             # bytes that stay the same for a host (meaning unknown; its lobby id here)
             self._queue(rec(T_SESSION, struct.pack(">Q", self.index) + sid + self.host_id))
-            # 08: the host's Steam ID, u64 and u16 ticket length, the ticket
-            self._queue(rec(T_TICKET, sid + struct.pack(">QH", 234, 234) + fake_ticket(self.host_sid)))
+            # 08: the host's Steam ID, u64 and u16 ticket length, the ticket (none in a quest's lobby, as between PCs)
+            if self.quest:
+                self._queue(rec(T_TICKET, sid + struct.pack(">QH", 0, 0)))
+            else:
+                self._queue(rec(T_TICKET, sid + struct.pack(">QH", 234, 234) + fake_ticket(self.host_sid)))
             self._queue(rec(T_END))
-            self.log("[lobby] the PC asked to join: answered as its host (session as player %d, ticket, end of members)"
-                     % self.index)
+            self.log("[lobby] the PC asked to join %s: answered as its host (session as player %d, ticket, end of members)"
+                     % ("the quest" if self.quest else "the room", self.index))
         elif t == T_TICKET:
             self.log("[lobby] the PC sent its ticket")
 

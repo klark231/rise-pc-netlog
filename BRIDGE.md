@@ -122,3 +122,10 @@ Steam lobby but a made-up one standing for the same session (`bridge.cpp` `creat
 doesn't leave the room. The PC's lobby member data is kept per lobby, so its Index in the quest doesn't change its
 Index in the room. `rise_crossplay_quest.lua` (installed by RiseBridge into `reframework/autorun`; also a mod for the
 port) logs the quest calls on both sides, with the session IDs. The PC joining a Switch quest is next.
+
+Second quest test (03:32): the PC's quest stayed in the Switch session, and the phone joined it mid-quest
+(`requestEnterRoomInMiddle` … `funcOnGoQuest`), then retired at once (`sendLocalQuestRetire`). As the quest lobby's
+maker the PC had set its Index to 0, the Switch host's slot. Now the plugin hands the PC its room slot back for the
+quest lobby, as a Switch player keeps its slot in a Local Play quest. And for the PC joining a Switch quest: its empty
+session ID is swapped (by the quest script, on PC) for the ID the PC made for the plugin's quest lobby, so the PC joins
+that lobby; the helper answers that join again from record 1, with no ticket, as a PC host does for a quest.
