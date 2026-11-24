@@ -9,7 +9,11 @@
 --   * once a second, a line per player slot whenever that slot changes: is there a hunter, is it drawn, is it ours,
 --     and its RemoteGameObject (network name, master index, message version, prefab, instance)
 --   * the PlayerNetwork.receive overloads and the PlayerBase deserialize calls, the first time each one happens for a
---     player and then every 200 calls
+--     player and then every 200 calls. The port has some overloads as one function: a call to any of them counts for
+--     each overload in that group (they go up together)
+--   * PlayerNetwork's other packet and state functions (names with Packet, Fsm, Recv, Receive, Sync or Periodic), the
+--     same way
+--   * every 10 s, how many calls each of those had per player since the last time
 
 local TAG = "[xprobe] "
 local function say(text) log.info(TAG .. text) end
@@ -44,9 +48,11 @@ end
 -- hooks ---------------------------------------------------------------------------------------------------------------
 
 local counts = {}
+local recent = {}  -- calls since the last summary
 local function counted(key, detail)
     local n = (counts[key] or 0) + 1
     counts[key] = n
+    recent[key] = (recent[key] or 0) + 1
     if n == 1 or n % 200 == 0 then
         say(key .. " #" .. n .. (detail and (" " .. detail) or ""))
     end
@@ -99,11 +105,13 @@ for _, name in ipairs({ "createPlayer", "setPlayerCreateBaseData", "instantiateP
     end)
 end
 
+local function network_player(args)
+    return player_index(call(this_object(args), "get_RefPlayerBase"))
+end
+
 hook_all("snow.PlayerNetwork", "receive", function(signature)
     return function(args)
-        local network = this_object(args)
-        local base = call(network, "get_RefPlayerBase")
-        counted("receive " .. signature .. " player " .. player_index(base))
+        counted(signature .. " player " .. network_player(args))
     end
 end)
 
@@ -113,6 +121,30 @@ for _, name in ipairs({ "deserializeNetworkCommonFlags", "deserializeNetworkPlAt
             counted(signature .. " player " .. player_index(this_object(args)))
         end
     end)
+end
+
+-- PlayerNetwork's other packet and state functions
+do
+    local td = sdk.find_type_definition("snow.PlayerNetwork")
+    local names = {}
+    for _, method in ipairs(td and try(td.get_methods, td) or {}) do
+        local name = try(method.get_name, method) or ""
+        if name ~= "receive" and not names[name] and not try(method.is_static, method) then
+            for _, word in ipairs({ "Packet", "Fsm", "Recv", "Receive", "Sync", "Periodic" }) do
+                if name:find(word) then names[name] = true break end
+            end
+        end
+    end
+    local list = {}
+    for name in pairs(names) do list[#list + 1] = name end
+    table.sort(list)
+    for _, name in ipairs(list) do
+        hook_all("snow.PlayerNetwork", name, function(signature)
+            return function(args)
+                counted(signature .. " player " .. network_player(args))
+            end
+        end)
+    end
 end
 
 hook_all("via.puppet.RemoteGameObject", "instantiate", function(signature)
@@ -155,7 +187,22 @@ local function describe(manager, index)
     return table.concat(parts, ", ")
 end
 
+local next_summary = 0
+
 re.on_frame(function()
+    local wall = os.time()
+    if wall >= next_summary then
+        next_summary = wall + 10
+        local keys = {}
+        for key in pairs(recent) do keys[#keys + 1] = key end
+        if #keys > 0 then
+            table.sort(keys)
+            local parts = {}
+            for _, key in ipairs(keys) do parts[#parts + 1] = key .. " " .. recent[key] end
+            say("last 10 s: " .. table.concat(parts, "; "))
+            recent = {}
+        end
+    end
     local now = os.clock()
     if now < next_check then return end
     next_check = now + 1

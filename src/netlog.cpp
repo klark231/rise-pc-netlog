@@ -6,9 +6,9 @@
 // - dinput8.dll: the game loads it at start; this one loads the real one from System32 and passes its six functions
 //   through (exports.def), so input works as before.
 // - rise_crossplay.dll (RISE_PLUGIN): a REFramework plugin, for when REFramework already is the dinput8.dll.
-//   REFramework loads everything in reframework/plugins while it starts, which is still well before the game creates
-//   its Steam interfaces, so the hooks go in from DllMain the same way; reframework_plugin_initialize only catches a
-//   Steam library that showed up in between.
+//   REFramework loads everything in reframework/plugins while it starts, when the Steam libraries are already loaded
+//   (catch_up picks the one the game talks to). reframework_plugin_initialize also wraps the client and the
+//   interfaces it handed out, if the game started Steam before that (wrap_existing).
 //
 // What it watches: every Steam call goes through the Steam client library's CreateInterface (steamclient64.dll, or a
 // library in its place). LoadLibraryExW is hooked to catch that library the moment it's loaded, and its
@@ -694,10 +694,56 @@ HMODULE WINAPI load_library(LPCWSTR name, HANDLE file, DWORD flags) {
     return m;
 }
 
-// The Steam libraries if they were loaded before the hook on LoadLibraryExW went in
+// A library as the game loaded it: the copy next to MonsterHunterRise.exe if there is one, else any by that name.
+// OnlineFix keeps Steam's own steam_api64.dll in _storage_ and loads it too, and by name alone that one can come first.
+HMODULE game_module(const wchar_t* name) {
+    wchar_t path[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n && n < MAX_PATH) {
+        if (wchar_t* slash = wcsrchr(path, L'\\')) {
+            slash[1] = 0;
+            if (wcslen(path) + wcslen(name) < MAX_PATH) {
+                wcscat_s(path, name);
+                if (HMODULE m = GetModuleHandleW(path)) return m;
+            }
+        }
+    }
+    return GetModuleHandleW(name);
+}
+
+// The Steam libraries if they were loaded before the hook on LoadLibraryExW went in. OnlineFix64.dll first: it loads
+// Steam's steamclient64.dll for its own use, but the game talks to OnlineFix (as a plugin, both are already loaded
+// here, and steamclient64.dll took the hooks while the game's calls went past them).
 void catch_up() {
-    for (const wchar_t* n : {L"steamclient64.dll", L"OnlineFix64.dll"}) check_module(GetModuleHandleW(n));
-    for (const wchar_t* n : {L"steam_api64.dll", L"OnlineFix64.dll"}) check_flat(GetModuleHandleW(n));
+    for (const wchar_t* n : {L"OnlineFix64.dll", L"steamclient64.dll"}) check_module(game_module(n));
+    for (const wchar_t* n : {L"steam_api64.dll", L"OnlineFix64.dll"}) check_flat(game_module(n));
+}
+
+// If the game started Steam before REFramework loaded the plugins, its ISteamClient and the interfaces it already has
+// never went through CreateInterface here, and the lobby search wouldn't reach the bridge. They're asked for again
+// (Steam hands out the same objects) and wrapped: the wrappers patch the vtables, which the game's objects share. Not
+// from DllMain: calling into Steam under the loader lock isn't safe.
+void wrap_existing() {
+    static std::atomic<bool> done{false};
+    HMODULE api = game_module(L"steam_api64.dll");
+    if (done || !g_create_interface || !api) return;
+    using Handle = int(__cdecl*)();
+    auto get_user = reinterpret_cast<Handle>(GetProcAddress(api, "SteamAPI_GetHSteamUser"));
+    auto get_pipe = reinterpret_cast<Handle>(GetProcAddress(api, "SteamAPI_GetHSteamPipe"));
+    const int user = get_user ? get_user() : 0, pipe = get_pipe ? get_pipe() : 0;
+    if (!user || !pipe) return;  // Steam isn't up yet: CreateInterface will see it as usual
+    if (done.exchange(true)) return;
+    void* client = nullptr;
+    int rc = 0;
+    for (const char* version : {"SteamClient017", "SteamClient020"})
+        if (void* c = create_interface(version, &rc)) client = c;
+    if (!client || !g_get_generic) {
+        log_line("Steam was already running, but its client couldn't be wrapped: the bridge won't see the lobbies\n");
+        return;
+    }
+    for (const char* version : {"SteamUser021", "SteamUtils010", "SteamMatchMaking009", "SteamNetworkingMessages002"})
+        get_generic(client, user, pipe, version);
+    log_line("Steam was already running: its client and interfaces wrapped where they are\n");
 }
 
 void start() {
@@ -729,6 +775,7 @@ void start() {
 extern "C" __declspec(dllexport) bool reframework_plugin_initialize(const void*) {
     log_line("rise-pc-netlog: loaded as a REFramework plugin\n");
     catch_up();
+    wrap_existing();
     return true;
 }
 
