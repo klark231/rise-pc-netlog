@@ -295,6 +295,7 @@ void __fastcall numerical_filter(void* self, const char* key, int value, int cmp
 
 uint64_t __fastcall create_lobby(void* self, int type, int max) {
     log_line("CreateLobby type %d, up to %d\n", type, max);
+    if (type == 3 && bridge::on() && bridge::in_room()) return bridge::create_quest_lobby();
     return g_create_lobby(self, type, max);
 }
 
@@ -380,7 +381,10 @@ const char* __fastcall get_lobby_data(void* self, uint64_t lobby, const char* ke
 bool __fastcall set_lobby_data(void* self, uint64_t lobby, const char* key, const char* value) {
     log_line("SetLobbyData lobby %llu \"%s\" = \"%s\"\n", static_cast<unsigned long long>(lobby), key ? key : "",
              value ? value : "");
-    if (bridge::fake_lobby(lobby)) return true;
+    if (bridge::fake_lobby(lobby)) {
+        bridge::set_lobby_data(lobby, key, value);
+        return true;
+    }
     return g_set_lobby_data(self, lobby, key, value);
 }
 

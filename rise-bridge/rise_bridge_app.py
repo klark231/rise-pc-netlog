@@ -17,7 +17,7 @@ FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else HERE
 GAME_EXE, FLAG, DLL = "MonsterHunterRise.exe", "rise_bridge.txt", "dinput8.dll"
 PLUGIN = "rise_crossplay.dll"    # the same code built as a REFramework plugin (reframework/plugins)
-QUEST_LUA = "rise_crossplay_quest.lua"  # quests the Local Play way while in a Switch room (reframework/autorun)
+QUEST_LUA = "rise_crossplay_quest.lua"  # logs what the game does with a quest in a Switch room (reframework/autorun)
 CAL_FLAG, HELLO = "rise_bridge_calibrate.txt", "rise_hello.txt"
 DEFAULTS = {"server": "meoli.viewdns.net", "key": "", "name": "PCBridge", "game_dir": ""}
 CONFIG = os.path.join(APP_DIR, "RiseBridge.json")
@@ -183,10 +183,10 @@ def _install_plugin(game_dir, src):
 
 
 def _install_quest(game_dir, src):
-    """The quest script (REFramework runs it): without it a quest between the PC and the Switch can't be joined"""
+    """The quest log script (REFramework runs it): the [xquest] lines in re2_framework_log.txt"""
     dst = quest_path(game_dir)
     if not src:
-        return ["no %s next to the app: quests between the PC and the Switch won't work" % QUEST_LUA]
+        return ["no %s next to the app: no [xquest] lines in REFramework's log" % QUEST_LUA]
     if os.path.isfile(dst) and _same(src, dst):
         return ["reframework/autorun/%s is already up to date" % QUEST_LUA]
     _copy(src, dst)

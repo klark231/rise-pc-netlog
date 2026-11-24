@@ -110,7 +110,15 @@ sides see each other's hunters. Quests didn't work either way, because the two v
   the game's packed ones (not plain or bit-aligned anywhere in the captures).
 - Switch Local Play: the quest stays in the room's session.
 
-The game has both ways in it, chosen by `snow.SnowSessionManager.IsInternet` / `isLocalnet`. `rise_crossplay_quest.lua`
-(installed by RiseBridge into `reframework/autorun` along with the plugin) has the PC take the Local Play way once
-it's in a room. Its checkbox is in REFramework's menu (Script Generated UI → Crossplay quests). It logs `[xquest]`
-lines: the quest calls and the session IDs the quests carry.
+The game has both ways in it, but answering its `IsInternet` / `isLocalnet` for it did nothing: neither is asked
+when a quest is posted or joined. The `[xquest]` lines of that test showed the rest:
+
+- The Switch takes the PC's quest the Local Play way, session ID and all: `requestEnterRoom`, `requestPrepareQuest`,
+  the PC's member list, `funcOnGoQuest`. Only the session is missing: the PC's quest ran in its own Steam lobby.
+- A Switch quest's session ID is empty (Local Play has none), so the PC has no lobby to join.
+
+So the plugin now keeps a quest the PC posts in a Switch room inside the Switch session: `CreateLobby` type 3 makes no
+Steam lobby but a made-up one standing for the same session (`bridge.cpp` `create_quest_lobby`), and leaving it
+doesn't leave the room. The PC's lobby member data is kept per lobby, so its Index in the quest doesn't change its
+Index in the room. `rise_crossplay_quest.lua` (installed by RiseBridge into `reframework/autorun`; also a mod for the
+port) logs the quest calls on both sides, with the session IDs. The PC joining a Switch quest is next.

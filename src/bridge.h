@@ -18,6 +18,11 @@ uint64_t request_list();                         // a call-result handle
 uint64_t lobby_by_index(int i);
 const char* lobby_data(uint64_t lobby, const char* key);
 uint64_t join(uint64_t lobby);                   // a call-result handle
+// A quest the PC posts while it's in a Switch room: its own session on PC (a Steam lobby), the room's on the Switch.
+// The lobby is made up here and stands for the same Switch session, so the quest's members are the room's.
+bool in_room();
+uint64_t create_quest_lobby();                   // a call-result handle (LobbyCreated_t)
+void set_lobby_data(uint64_t lobby, const char* key, const char* value);
 void leave(uint64_t lobby);
 int member_count(uint64_t lobby);
 uint64_t member_by_index(uint64_t lobby, int i, uint64_t me);

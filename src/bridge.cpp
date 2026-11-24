@@ -33,6 +33,7 @@ void L(const char* fmt, ...) {
 // IDs made up here. The lobby's looks like the ones in the log (universe 1, type lobby); the host's is an ordinary user's.
 constexpr uint64_t kLobbyBase = 0x01860000B1D60000ull;  // + hub index
 constexpr uint64_t kHostId = 0x0110000100000000ull | 0x4B1D0000ull;
+constexpr uint64_t kQuestLobby = kLobbyBase + 32;  // the PC's quest in a Switch room (create_quest_lobby)
 uint64_t (*g_own_id)() = nullptr;  // the game's own Steam ID (set by netlog)
 bool g_calibrate = false;          // rise_bridge_calibrate.txt: learn the hello this game expects (see send_to_host)
 uint8_t g_hello[15] = {};          // rise_hello.txt: the hello the game expects from a peer (what it sends to its own ID)
@@ -91,6 +92,9 @@ uint64_t g_list_handle = 0, g_join_handle = 0, g_join_lobby = 0;
 DWORD g_list_deadline = 0;
 int g_channel = kDefaultChannel;
 std::map<std::string, std::string> g_strings;  // returned const char*s point in here (std::map nodes don't move)
+bool g_in_room = false;                         // joined a Switch session (JOINED) and not left it
+uint64_t g_quest_owner = 0;                     // who made the quest lobby: the PC itself, or the Switch host
+std::map<std::string, std::string> g_quest_data;  // what the game set on the quest lobby
 
 template <typename T>
 std::vector<uint8_t> bytes_of(const T& v) {
@@ -175,6 +179,7 @@ void on_datagram(const std::string& s) {
     } else if (s.compare(0, 6, "JOINED") == 0) {
         std::lock_guard lock(g_m);
         L("daemon: joined the Switch session");
+        g_in_room = true;
         if (g_join_handle) lobby_entered(g_join_lobby, 1);
         g_join_handle = 0;
     } else if (s.compare(0, 3, "ERR") == 0) {
@@ -317,6 +322,11 @@ uint64_t lobby_by_index(int i) {
 }
 
 const char* lobby_data_impl(uint64_t lobby, const char* key) {
+    if (lobby == kQuestLobby) {
+        std::lock_guard lock(g_m);
+        auto it = g_quest_data.find(key ? key : "");
+        return it != g_quest_data.end() ? it->second.c_str() : "";
+    }
     Lobby l;
     {
         std::lock_guard lock(g_m);
@@ -355,32 +365,92 @@ uint64_t join(uint64_t lobby) {
     std::lock_guard lock(g_m);
     g_join_handle = g_next_handle++;
     g_join_lobby = lobby;
+    if (lobby == kQuestLobby) {  // the quest of the room the PC is in: already in its session
+        L("JoinLobby: the quest lobby, in the Switch session already");
+        if (!g_quest_owner) g_quest_owner = host_id();
+        const uint64_t h = g_join_handle;
+        lobby_entered(lobby, 1);
+        g_join_handle = 0;
+        return h;
+    }
     L("JoinLobby: asking the daemon to join hub %d", static_cast<int>(lobby - kLobbyBase));
     to_daemon("JOIN " + std::to_string(lobby - kLobbyBase));
     return g_join_handle;
 }
 
-void leave(uint64_t) {
+void leave(uint64_t lobby) {
+    if (lobby == kQuestLobby) {  // the quest is over; the room (the Switch session) stays
+        std::lock_guard lock(g_m);
+        L("LeaveLobby: the quest lobby (the PC stays in the Switch session)");
+        g_quest_owner = 0;
+        g_quest_data.clear();
+        return;
+    }
     L("LeaveLobby: telling the daemon");
+    {
+        std::lock_guard lock(g_m);
+        g_in_room = false;
+    }
     to_daemon("LEAVE");
+}
+
+bool in_room() {
+    std::lock_guard lock(g_m);
+    return g_in_room;
+}
+
+// CreateLobby for a quest while in a Switch room: no Steam lobby. Steam's own order: LobbyCreated_t (513) as the call
+// result, then LobbyEnter_t (504) and LobbyDataUpdate_t (505).
+uint64_t create_quest_lobby() {
+    std::lock_guard lock(g_m);
+    const uint64_t handle = g_next_handle++;
+    g_quest_owner = g_own_id ? g_own_id() : 0;
+    g_quest_data.clear();
+    std::vector<uint8_t> created(16, 0);  // LobbyCreated_t: result u32 (1, OK), lobby u64 at 8
+    created[0] = 1;
+    memcpy(created.data() + 8, &kQuestLobby, 8);
+    complete(handle, 513, created);
+    std::vector<uint8_t> enter(20, 0);
+    memcpy(enter.data(), &kQuestLobby, 8);
+    const uint32_t ok = 1;
+    memcpy(enter.data() + 16, &ok, 4);
+    g_cbs.push_back({504, enter});
+    std::vector<uint8_t> upd(20, 0);
+    memcpy(upd.data(), &kQuestLobby, 8);
+    memcpy(upd.data() + 8, &kQuestLobby, 8);
+    upd[16] = 1;
+    g_cbs.push_back({505, upd});
+    L("CreateLobby for a quest in a Switch room: lobby %llx, in the Switch session (no Steam lobby)",
+      static_cast<unsigned long long>(kQuestLobby));
+    return handle;
+}
+
+void set_lobby_data(uint64_t lobby, const char* key, const char* value) {
+    if (lobby != kQuestLobby || !key) return;
+    std::lock_guard lock(g_m);
+    g_quest_data[key] = value ? value : "";
 }
 int member_count(uint64_t) { L("GetNumLobbyMembers -> 2"); return 2; }
 uint64_t member_by_index(uint64_t, int i, uint64_t me) {
     L("GetLobbyMemberByIndex(%d)", i);
     return i == 0 ? host_id() : me;
 }
-uint64_t owner(uint64_t) { return host_id(); }
+uint64_t owner(uint64_t lobby) {
+    std::lock_guard lock(g_m);
+    return lobby == kQuestLobby && g_quest_owner ? g_quest_owner : host_id();
+}
 // What the game set as its own member data. Steam hands it back to everyone, the game included, and the game waits for
 // that: after SetLobbyMemberData("Index", "3") it read its own Index every frame until it said 3 (2026-11-24 test,
 // stuck after joining with only pings going both ways).
-std::map<std::string, std::string> g_own_member;
+// Per lobby: in a quest the PC sets its Index there too, and the room's must stay as it was.
+std::map<std::pair<uint64_t, std::string>, std::string> g_own_member;
 
-const char* member_data(uint64_t, uint64_t member, const char* key) {
+const char* member_data(uint64_t lobby, uint64_t member, const char* key) {
     const bool host = member == host_id();
     static std::set<std::string> logged;
     std::lock_guard lock(g_m);
     if (!host && key) {
-        auto it = g_own_member.find(key);
+        auto it = g_own_member.find({lobby, key});
         if (it != g_own_member.end()) return it->second.c_str();
     }
     if (logged.insert(std::string(host ? "host " : "us ") + (key ? key : "")).second)
@@ -392,7 +462,7 @@ const char* member_data(uint64_t, uint64_t member, const char* key) {
 void set_member_data(uint64_t lobby, const char* key, const char* value) {
     if (!key) return;
     std::lock_guard lock(g_m);
-    g_own_member[key] = value ? value : "";
+    g_own_member[{lobby, key}] = value ? value : "";
     L("SetLobbyMemberData(%s, %s): kept as ours, LobbyDataUpdate queued", key, value ? value : "");
     // LobbyDataUpdate_t for our member (lobby, member, success), as Steam sends when member data changes
     const uint64_t me = g_own_id ? g_own_id() : 0;
