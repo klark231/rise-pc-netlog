@@ -68,7 +68,13 @@ class Daemon:
     def _lobbies(self, st) -> None:
         """The lobby channel isn't passed through: the bridge is the PC's host there, and the Switch host's joiner
         (bridge/lobby.py). A thread sends the PC host's keep-alives while this station lasts."""
-        self.pc_lobby = lobby.PcLobby(HOST_SID, lambda m: self.reply("RECV " + joinmsgs.steam_wrap(m).hex()), self.log)
+        # The PC plays as the slot the Switch host gave this station: its address is 169.254.x.(slot + 1)
+        index = (st.link.address & 0xFF) - 1
+        if not 1 <= index <= 3:
+            self.log("station address %08x: no player slot in it, the PC goes in as player 3" % st.link.address)
+            index = 3
+        self.pc_lobby = lobby.PcLobby(HOST_SID, lambda m: self.reply("RECV " + joinmsgs.steam_wrap(m).hex()), self.log,
+                                      index)
         self.sw_lobby = lobby.SwitchLobby(lambda m: st.send_game(st._host()[0], m), self.log)
 
         def ticks(pc=self.pc_lobby):

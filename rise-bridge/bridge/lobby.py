@@ -44,8 +44,9 @@ def fake_ticket(sid: int) -> bytes:
 class PcLobby:
     """The PC host's side of the lobby, toward the PC game."""
 
-    def __init__(self, host_sid: int, send, log=print):
+    def __init__(self, host_sid: int, send, log=print, index: int = 3):
         self.host_sid, self.send, self.log = host_sid, send, log
+        self.index = index  # the PC's player slot, the one the Switch host gave our station
         self.host_id = self.pc_id = None   # the 4-byte ids of the two games (from the platform messages)
         self.next_seq, self.unacked, self.last_rx = 1, [], 0
         self.answered = False
@@ -87,13 +88,16 @@ class PcLobby:
         if t == T_JOIN and not self.answered:
             self.answered = True
             sid = struct.pack(">Q", self.host_sid)
-            # 02: u64 3 (in every capture), the host's Steam ID, 4 bytes that stay the same for a host (meaning unknown;
-            # its lobby id here)
-            self._queue(rec(T_SESSION, struct.pack(">Q", 3) + sid + self.host_id))
+            # 02: the joiner's player slot (u64: a PC joining a PC host alone got 1 and set its lobby Index to 1; with 3
+            # here it called itself player 3 while the Switch had it as player 1, so the Switch's copy of its hunter,
+            # L_Pl1_..., never got the state the PC sent for L_Pl3_... and stayed invisible), the host's Steam ID, 4
+            # bytes that stay the same for a host (meaning unknown; its lobby id here)
+            self._queue(rec(T_SESSION, struct.pack(">Q", self.index) + sid + self.host_id))
             # 08: the host's Steam ID, u64 and u16 ticket length, the ticket
             self._queue(rec(T_TICKET, sid + struct.pack(">QH", 234, 234) + fake_ticket(self.host_sid)))
             self._queue(rec(T_END))
-            self.log("[lobby] the PC asked to join: answered as its host (session, ticket, end of members)")
+            self.log("[lobby] the PC asked to join: answered as its host (session as player %d, ticket, end of members)"
+                     % self.index)
         elif t == T_TICKET:
             self.log("[lobby] the PC sent its ticket")
 

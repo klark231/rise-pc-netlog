@@ -13,13 +13,14 @@ def test_wire():
 
 def test_pc_lobby():
     out = []
-    pc = lobby.PcLobby(0x011000014B1D0000, out.append, log=lambda s: None)
+    pc = lobby.PcLobby(0x011000014B1D0000, out.append, log=lambda s: None, index=1)
     me, host = bytes.fromhex("45ba091c"), bytes.fromhex("277312e7")
     join = lobby.rec(lobby.T_JOIN, struct.pack(">Q", 0x0110000112345678) + b"\x01\x02\x03\x04\x00")
     pc.from_pc(wire.build(wire.LOBBY, me, host, 0, [(1, join)]))
     ch, s, r, ack, recs = wire.parse(wire.decode(out[-1]))
     assert (s, r, ack) == (host, me, 1)
     assert [b[:3].hex() for _, b in recs] == ["030002", "030008", "030005"] and len(recs[1][1]) == 255
+    assert struct.unpack_from(">Q", recs[0][1], 3)[0] == 1    # the slot the PC is to take
     pc.from_pc(wire.build(wire.LOBBY, me, host, 3, []))       # the PC acknowledges all three
     pc.tick()
     ch, s, r, ack, recs = wire.parse(wire.decode(out[-1]))
