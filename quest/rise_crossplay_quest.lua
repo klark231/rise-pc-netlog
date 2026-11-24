@@ -100,6 +100,44 @@ for _, tn in ipairs({ "snow.LobbyManager", mgr_name }) do
     end
 end
 
+-- Who the game takes for whom in a quest, whenever it changes: its own index (LobbyManager._myselfIndex and
+-- getMyQuestIndex), the quest host's (getQuestHostIndex) and the quest member list (its session type and join, ready
+-- and prepare flags per slot). On 2026-11-25 the phone joined the PC's quest, waited a few seconds while loading and
+-- retired; the PC as the quest's maker had Index 0 in its quest lobby, the phone's slot in the room.
+local function list_text(arr)
+    if arr == nil then return "nil" end
+    local n = try(arr.call, arr, "get_Count") or try(arr.get_size, arr) or try(arr.call, arr, "get_Length")
+    if n == nil then return "?" end
+    local out = {}
+    for i = 0, math.min(n, 8) - 1 do
+        local v = try(arr.call, arr, "get_Item", i) or try(arr.get_element, arr, i)
+        if type(v) == "userdata" then v = try(v.call, v, "ToString") or "obj" end
+        out[#out + 1] = tostring(v)
+    end
+    return "[" .. table.concat(out, " ") .. "]"
+end
+
+local last_state, next_state = nil, 0
+re.on_frame(function()
+    local now = os.clock()
+    if now < next_state then return end
+    next_state = now + 0.5
+    local lm = sdk.get_managed_singleton("snow.LobbyManager")
+    if lm == nil then return end
+    local ml = try(lm.get_field, lm, "_questMemberList")
+    local state = "myself " .. tostring(try(lm.get_field, lm, "_myselfIndex")) ..
+        ", my quest index " .. tostring(try(lm.call, lm, "getMyQuestIndex")) ..
+        ", quest host " .. tostring(try(lm.call, lm, "getQuestHostIndex")) ..
+        ", member list " .. (ml and ("type " .. tostring(try(ml.get_field, ml, "_SessionType")) ..
+            " join " .. list_text(try(ml.get_field, ml, "_join")) ..
+            " ready " .. list_text(try(ml.get_field, ml, "_ready")) ..
+            " prepare " .. list_text(try(ml.get_field, ml, "_prepare"))) or "none")
+    if state ~= last_state then
+        last_state = state
+        say("state: " .. state)
+    end
+end)
+
 -- The PC joining a Switch quest. A Switch quest has no session ID (Local Play has no session of its own), and with
 -- an empty one the PC gave up before asking Steam for anything. It gets the ID of the plugin's quest lobby instead,
 -- which stands for the Switch session the PC is already in: this is the ID the PC itself made for that lobby

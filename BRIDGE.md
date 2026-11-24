@@ -125,7 +125,8 @@ port) logs the quest calls on both sides, with the session IDs. The PC joining a
 
 Second quest test (03:32): the PC's quest stayed in the Switch session, and the phone joined it mid-quest
 (`requestEnterRoomInMiddle` … `funcOnGoQuest`), then retired at once (`sendLocalQuestRetire`). As the quest lobby's
-maker the PC had set its Index to 0, the Switch host's slot. Now the plugin hands the PC its room slot back for the
-quest lobby, as a Switch player keeps its slot in a Local Play quest. And for the PC joining a Switch quest: its empty
+maker the PC had set its Index to 0, the Switch host's slot. Handing it back its room slot for the quest lobby
+instead (03:44) didn't do: the PC waits until its Index reads back as it set it, and stayed on "creating the quest
+session". That's undone; the quest script now logs each side's own index, the quest host's and the member list. And for the PC joining a Switch quest: its empty
 session ID is swapped (by the quest script, on PC) for the ID the PC made for the plugin's quest lobby, so the PC joins
 that lobby; the helper answers that join again from record 1, with no ticket, as a PC host does for a quest.
