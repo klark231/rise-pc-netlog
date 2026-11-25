@@ -135,3 +135,14 @@ Third quest test (04:03): the phone's quest member list had only slot 0 joined, 
 loading screen, and the PC's game-side index stayed 1 (`LobbyManager._myselfIndex`). The PC's quest lobby Index (0)
 is what put it in slot 0. Now the plugin reads that Index back to the PC as it set it once (what it waits for), then
 as its room slot, with a LobbyDataUpdate so the game reads it again.
+
+## 2026-11-26: quest slots (what the logs of build 6 showed)
+
+PC posts, phone joins: the PC's own index stayed `my quest index 0, quest host 0` for the whole quest although its quest
+lobby Index was handed back as its room slot, 1 (the game keeps the first read). The phone, slot 0 in its room, read the
+PC's quest as `quest host 0` and `join [true false false false]`: the PC's slot 0 landed on its own, so it never saw
+the PC and sat in Now Loading. `rise_crossplay_quest.lua` now also lists the game's index/host fields
+(`[xquest] fields`, 1 s after a quest is created or entered, then 5 s and 10 s later) to find which field the game keeps
+its quest slot in. With `reframework/data/rise_quest_slot.txt` on the PC it also tries setting them to the room slot
+(`[xquest] slot fix`); off otherwise. PC joining a Switch quest: the PC repeated its lobby join for 18 s and gave up
+(`requestExitRoom`); not looked at yet.
