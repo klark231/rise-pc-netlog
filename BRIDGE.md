@@ -130,3 +130,8 @@ instead (03:44) didn't do: the PC waits until its Index reads back as it set it,
 session". That's undone; the quest script now logs each side's own index, the quest host's and the member list. And for the PC joining a Switch quest: its empty
 session ID is swapped (by the quest script, on PC) for the ID the PC made for the plugin's quest lobby, so the PC joins
 that lobby; the helper answers that join again from record 1, with no ticket, as a PC host does for a quest.
+
+Third quest test (04:03): the phone's quest member list had only slot 0 joined, its own slot, all the way through its
+loading screen, and the PC's game-side index stayed 1 (`LobbyManager._myselfIndex`). The PC's quest lobby Index (0)
+is what put it in slot 0. Now the plugin reads that Index back to the PC as it set it once (what it waits for), then
+as its room slot, with a LobbyDataUpdate so the game reads it again.

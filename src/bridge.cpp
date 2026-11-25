@@ -444,11 +444,33 @@ uint64_t owner(uint64_t lobby) {
 // stuck after joining with only pings going both ways).
 // Per lobby: in a quest the PC sets its Index there too, and the room's must stay as it was.
 std::map<std::pair<uint64_t, std::string>, std::string> g_own_member;
+char g_room_index[8] = {};   // the PC's Index in the room, as it set it there
+int g_quest_index_reads = 0;  // reads of its Index in the quest lobby (member_data)
 
 const char* member_data(uint64_t lobby, uint64_t member, const char* key) {
     const bool host = member == host_id();
     static std::set<std::string> logged;
     std::lock_guard lock(g_m);
+    // The PC's Index in its quest lobby. As the lobby's maker it sets 0, the Switch host's slot, and waits until it
+    // reads 0 back (answering its room slot from the start, 03:44, left it on "creating the quest session"). With 0
+    // the phone saw the quest's slot 0 taken by the host, i.e. itself, never the PC, and gave up loading into it
+    // (04:03). So the first read gives 0 and every one after it the PC's slot in the room, with a LobbyDataUpdate so
+    // the game reads it again.
+    if (!host && key && lobby == kQuestLobby && !strcmp(key, "Index") && g_quest_owner && g_room_index[0]) {
+        if (g_quest_index_reads++ == 0) {
+            auto it = g_own_member.find({lobby, key});
+            std::vector<uint8_t> upd(20, 0);
+            const uint64_t me = g_own_id ? g_own_id() : 0;
+            memcpy(upd.data(), &lobby, 8);
+            memcpy(upd.data() + 8, &me, 8);
+            upd[16] = 1;
+            g_cbs.push_back({505, upd});
+            L("quest lobby: the PC's Index read back as it set it, %s; from now on its room slot, %s",
+              it != g_own_member.end() ? it->second.c_str() : "(none)", g_room_index);
+            if (it != g_own_member.end()) return it->second.c_str();
+        }
+        return g_room_index;
+    }
     if (!host && key) {
         auto it = g_own_member.find({lobby, key});
         if (it != g_own_member.end()) return it->second.c_str();
@@ -463,6 +485,8 @@ void set_member_data(uint64_t lobby, const char* key, const char* value) {
     if (!key) return;
     std::lock_guard lock(g_m);
     g_own_member[{lobby, key}] = value ? value : "";
+    if (lobby != kQuestLobby && !strcmp(key, "Index") && value) snprintf(g_room_index, sizeof g_room_index, "%s", value);
+    if (lobby == kQuestLobby && !strcmp(key, "Index")) g_quest_index_reads = 0;
     L("SetLobbyMemberData(%s, %s): kept as ours, LobbyDataUpdate queued", key, value ? value : "");
     // LobbyDataUpdate_t for our member (lobby, member, success), as Steam sends when member data changes
     const uint64_t me = g_own_id ? g_own_id() : 0;

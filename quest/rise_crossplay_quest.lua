@@ -117,6 +117,16 @@ local function list_text(arr)
     return "[" .. table.concat(out, " ") .. "]"
 end
 
+-- A quest index as the game returns it (a small struct or an enum, not a plain number)
+local function index_text(v)
+    if type(v) ~= "userdata" then return tostring(v) end
+    for _, f in ipairs({ "value__", "_Value", "_value", "value", "mValue" }) do
+        local x = try(v.get_field, v, f)
+        if x ~= nil and type(x) ~= "userdata" then return tostring(x) end
+    end
+    return tostring(try(v.call, v, "ToString") or "?")
+end
+
 local last_state, next_state = nil, 0
 re.on_frame(function()
     local now = os.clock()
@@ -126,8 +136,8 @@ re.on_frame(function()
     if lm == nil then return end
     local ml = try(lm.get_field, lm, "_questMemberList")
     local state = "myself " .. tostring(try(lm.get_field, lm, "_myselfIndex")) ..
-        ", my quest index " .. tostring(try(lm.call, lm, "getMyQuestIndex")) ..
-        ", quest host " .. tostring(try(lm.call, lm, "getQuestHostIndex")) ..
+        ", my quest index " .. index_text(try(lm.call, lm, "getMyQuestIndex")) ..
+        ", quest host " .. index_text(try(lm.call, lm, "getQuestHostIndex")) ..
         ", member list " .. (ml and ("type " .. tostring(try(ml.get_field, ml, "_SessionType")) ..
             " join " .. list_text(try(ml.get_field, ml, "_join")) ..
             " ready " .. list_text(try(ml.get_field, ml, "_ready")) ..
