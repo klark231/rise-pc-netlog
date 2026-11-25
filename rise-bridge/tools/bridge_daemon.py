@@ -141,6 +141,8 @@ class Daemon:
                 self.reply("ERR %s" % e)
         elif cmd == "JOIN":
             threading.Thread(target=self.join, args=(int(arg),), daemon=True).start()
+        elif cmd == "LOG":
+            self.log("[dll] " + arg)           # the DLL's own log lines (rise_netlog.txt isn't always complete)
         elif cmd == "SEND":
             self.to_switch(bytes.fromhex(arg))
         elif cmd == "LEAVE" and self.link:

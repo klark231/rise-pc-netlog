@@ -20,14 +20,26 @@ namespace bridge {
 namespace {
 
 void (*g_log)(const char*) = nullptr;
+void to_daemon(const std::string& s);  // defined below
 void L(const char* fmt, ...) {
-    if (!g_log) return;
     char buf[512];
     va_list a;
     va_start(a, fmt);
     vsnprintf(buf, sizeof buf, fmt, a);
     va_end(a);
-    g_log(buf);
+    if (g_log) g_log(buf);
+    // The same line to the helper (its log is written as it goes; rise_netlog.txt stopped at 03:05:10 in the 2026-11-26
+    // run, so the quest lines were lost). A line the game repeats is sent once every 2 s.
+    static std::mutex m;
+    static std::string last;
+    static DWORD last_t = 0;
+    std::lock_guard<std::mutex> lock(m);
+    const DWORD now = GetTickCount();
+    if (last != buf || now - last_t > 2000) {
+        last = buf;
+        last_t = now;
+        to_daemon(std::string("LOG ") + buf);
+    }
 }
 
 // IDs made up here. The lobby's looks like the ones in the log (universe 1, type lobby); the host's is an ordinary user's.
@@ -279,7 +291,7 @@ void start() {
     g_daemon.sin_port = htons(39600);
     inet_pton(AF_INET, "127.0.0.1", &g_daemon.sin_addr);
     L("bridge mode: the daemon is expected on 127.0.0.1:39600");
-    L("build 5: manual-dispatch call results, CSteamID returned through a hidden pointer, member and leave logging, hello swap");
+    L("build 6: manual-dispatch call results, CSteamID returned through a hidden pointer, member and leave logging, hello swap, quest lobby Index read once as set then its room slot, this log also sent to the helper");
     g_calibrate = GetFileAttributesA(game_file("rise_bridge_calibrate.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
     if (FILE* f = fopen(game_file("rise_hello.txt").c_str(), "r")) {
         char hex[64] = {};
