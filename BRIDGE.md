@@ -146,3 +146,17 @@ the PC and sat in Now Loading. `rise_crossplay_quest.lua` now also lists the gam
 its quest slot in. With `reframework/data/rise_quest_slot.txt` on the PC it also tries setting them to the room slot
 (`[xquest] slot fix`); off otherwise. PC joining a Switch quest: the PC repeated its lobby join for 18 s and gave up
 (`requestExitRoom`); not looked at yet.
+
+2026-11-26 04:35 (slot fix on): the game keeps the quest slot in `LobbyManager._myselfQuestIndex` (0 on the PC when it
+makes a quest, 0 on the phone); setting it to the room slot (1) held, but `getMyQuestIndex()` kept answering 0, so it is
+computed elsewhere. The PC's own member list was already right (PC slot 1, phone slot 0); the phone's wasn't: it takes
+itself for the quest host (`_quickMatchHost` true on the phone, false on the PC) and marks only its own slot joined.
+The quest script now dumps all LobbyManager fields (arrays with their contents), logs the return types of
+`getMyQuestIndex`/`getQuestHostIndex`, and with `rise_quest_slot.txt` also hooks `getMyQuestIndex` on the PC to answer
+its room slot while a quest member list exists.
+
+CORRECTION 2026-11-26 (late): setting `_myselfQuestIndex` to 1 on the PC (and the `getMyQuestIndex` hook that followed)
+made **Depart impossible** on the PC: no `requestPrepareQuest`/`goQuest` in the logs of 04:23 and 04:35, while the 03:43
+run (no slot fix) could depart. The game counts the PC as quest host 0, so the PC must keep quest index 0. Both
+experiments are removed; `rise_quest_slot.txt` does nothing any more (delete it if an old build is still installed).
+The phone side (it takes itself for the quest host and marks only its own slot) is the open problem.

@@ -186,9 +186,8 @@ end
 -- even though its quest lobby Index was handed back as its room slot (1), so the game keeps a copy of the first read.
 -- This lists the LobbyManager's index/host fields (and the quest member list's) a second after a quest is created or
 -- entered, and again 5 s and 10 s later, as "[xquest] fields". Read only.
--- With a file reframework/data/rise_quest_slot.txt (any content) the PC also tries to set every LobbyManager field with
--- "Quest" and "Index" in its name that reads 0 to the PC's room slot (_myselfIndex) while a quest member list exists:
--- an experiment, logged as "[xquest] slot fix". It is off without that file.
+-- Setting _myselfQuestIndex to the room slot (1) on the PC (an experiment, 2026-11-26) made Depart impossible there:
+-- the game still counts the PC as quest host 0. Removed; this part only reads.
 -- (This part is loaded from text, so a mistake in it is logged and the rest of the script still runs.)
 local fields_code = [==[
 local say, try, on_pc = ...
@@ -205,8 +204,15 @@ local function val_text(v)
     return tostring(try(v.call, v, "ToString") or "?")
 end
 
-local function wanted(name)
-    return name:find("ndex") or name:find("ost") or name:find("yself") or name:find("wner") or name:find("aster")
+local function arr_text(v)
+    local n = try(v.call, v, "get_Length") or try(v.call, v, "get_Count")
+    if n == nil then return nil end
+    local out = {}
+    for i = 0, math.min(n, 8) - 1 do
+        local e = try(v.call, v, "get_Item", i) or try(v.get_element, v, i)
+        out[#out + 1] = type(e) == "userdata" and "obj" or tostring(e)
+    end
+    return "[" .. table.concat(out, " ") .. "]"
 end
 
 local function dump(where)
@@ -216,11 +222,14 @@ local function dump(where)
     local n = 0
     for _, f in ipairs(try(lm_type.get_fields, lm_type) or {}) do
         local name = try(f.get_name, f) or "?"
-        if wanted(name) and not try(f.is_static, f) then
+        if not try(f.is_static, f) and not name:find("Action") then
             local ft = try(f.get_type, f)
-            say("  " .. name .. " : " .. tostring(ft and try(ft.get_full_name, ft)) .. " = " .. val_text(try(f.get_data, f, lm)))
+            local tn = tostring(ft and try(ft.get_full_name, ft))
+            local v = try(f.get_data, f, lm)
+            local text = (type(v) == "userdata" and tn:find("%[%]$") and arr_text(v)) or val_text(v)
+            say("  " .. name .. " : " .. tn .. " = " .. text)
             n = n + 1
-            if n >= 60 then break end
+            if n >= 250 then break end
         end
     end
     local ml = try(lm.get_field, lm, "_questMemberList")
@@ -228,51 +237,36 @@ local function dump(where)
     for _, f in ipairs(mtd and try(mtd.get_fields, mtd) or {}) do
         local name = try(f.get_name, f) or "?"
         if not try(f.is_static, f) then
-            say("  _questMemberList." .. name .. " = " .. val_text(try(f.get_data, f, ml)))
+            local v = try(f.get_data, f, ml)
+            say("  _questMemberList." .. name .. " = " .. ((type(v) == "userdata" and arr_text(v)) or val_text(v)))
         end
     end
+end
+
+for _, mname in ipairs({ "getMyQuestIndex", "getQuestHostIndex" }) do
+    local m = lm_type and lm_type:get_method(mname)
+    local rt = m and try(m.get_return_type, m)
+    say(mname .. " returns " .. tostring(rt and try(rt.get_full_name, rt)) .. ", value type " ..
+        tostring(rt and try(rt.is_value_type, rt)) .. ", size " .. tostring(rt and try(rt.get_valuetype_size, rt)))
 end
 
 local function trigger(name)
     local m = lm_type and lm_type:get_method(name)
     if m then
-        pcall(sdk.hook, m, function() dumps_left, next_dump = 3, os.clock() + 1 end, nil)
+        pcall(sdk.hook, m, function() dumps_left, next_dump = 2, os.clock() + 1 end, nil)
     end
 end
 trigger("createRoom")
 trigger("requestEnterRoom")
 trigger("goQuest")
 
-local fixing = on_pc and try(fs.read, "rise_quest_slot.txt") ~= nil
-local next_fix, fixed = 0, {}
-local function slot_fix()
-    local lm = sdk.get_managed_singleton("snow.LobbyManager")
-    if lm == nil or lm_type == nil or try(lm.get_field, lm, "_questMemberList") == nil then return end
-    local mine = tonumber(try(lm.get_field, lm, "_myselfIndex"))
-    if mine == nil or mine == 0 then return end
-    for _, f in ipairs(try(lm_type.get_fields, lm_type) or {}) do
-        local name = try(f.get_name, f) or "?"
-        if name:find("uest") and name:find("ndex") and not try(f.is_static, f) and val_text(try(f.get_data, f, lm)) == "0" then
-            local ok = pcall(lm.set_field, lm, name, mine)
-            if not fixed[name] then
-                fixed[name] = true
-                say("slot fix: " .. name .. " 0 -> " .. mine .. (ok and "" or " (the game refused)"))
-            end
-        end
-    end
-end
-if fixing then say("slot fix: ON (rise_quest_slot.txt found)") end
 
 re.on_frame(function()
     local now = os.clock()
     if dumps_left > 0 and now >= next_dump then
         dumps_left = dumps_left - 1
-        next_dump = now + (dumps_left == 1 and 5 or 10)
+        next_dump = now + 6
         dump("after a quest call, " .. dumps_left .. " more")
-    end
-    if fixing and now >= next_fix then
-        next_fix = now + 0.5
-        slot_fix()
     end
 end)
 say("fields probe ready")
