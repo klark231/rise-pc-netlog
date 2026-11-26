@@ -106,7 +106,8 @@ int g_channel = kDefaultChannel;
 std::map<std::string, std::string> g_strings;  // returned const char*s point in here (std::map nodes don't move)
 bool g_in_room = false;                         // joined a Switch session (JOINED) and not left it
 uint64_t g_quest_owner = 0;                     // who made the quest lobby: the PC itself, or the Switch host
-std::map<std::string, std::string> g_quest_data;  // what the game set on the quest lobby
+std::map<std::string, std::string> g_quest_data;  // what the game set on the quest lobby (or, in a Switch quest, the room's)
+uint64_t g_room_lobby = 0;                      // the hub lobby the PC joined (its Switch room)
 
 template <typename T>
 std::vector<uint8_t> bytes_of(const T& v) {
@@ -192,6 +193,7 @@ void on_datagram(const std::string& s) {
         std::lock_guard lock(g_m);
         L("daemon: joined the Switch session");
         g_in_room = true;
+        if (g_join_handle) g_room_lobby = g_join_lobby;
         if (g_join_handle) lobby_entered(g_join_lobby, 1);
         g_join_handle = 0;
     } else if (s.compare(0, 3, "ERR") == 0) {
@@ -291,7 +293,7 @@ void start() {
     g_daemon.sin_port = htons(39600);
     inet_pton(AF_INET, "127.0.0.1", &g_daemon.sin_addr);
     L("bridge mode: the daemon is expected on 127.0.0.1:39600");
-    L("build 6: manual-dispatch call results, CSteamID returned through a hidden pointer, member and leave logging, hello swap, quest lobby Index read once as set then its room slot, this log also sent to the helper");
+    L("build 7 (quest: room data for a joined Switch quest, member entered + member order for the PC's quest): manual-dispatch call results, CSteamID returned through a hidden pointer, member and leave logging, hello swap, quest lobby Index read once as set then its room slot, this log also sent to the helper");
     g_calibrate = GetFileAttributesA(game_file("rise_bridge_calibrate.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
     if (FILE* f = fopen(game_file("rise_hello.txt").c_str(), "r")) {
         char hex[64] = {};
@@ -373,6 +375,29 @@ const char* lobby_data(uint64_t lobby, const char* key) {
     return v;
 }
 
+void fill_quest_data_from_room() {  // g_m held
+    const size_t i = static_cast<size_t>(g_room_lobby - kLobbyBase);
+    if (!g_room_lobby || i >= g_lobbies.size()) {
+        L("JoinLobby: the quest lobby has no room to take its data from");
+        return;
+    }
+    const Lobby& l = g_lobbies[i];
+    g_quest_data["OwnerId"] = std::to_string(host_id());
+    g_quest_data["Name"] = l.name;
+    g_quest_data["P2pVersion"] = "0";
+    g_quest_data["Attribute"] = "0";
+    g_quest_data["Group"] = "0";
+    g_quest_data["IsPrivate"] = "false";
+    g_quest_data["IsClose"] = "false";
+    g_quest_data["IsEnableAuth"] = "true";
+    g_quest_data["SlotTotalUse"] = std::to_string(l.players);
+    g_quest_data["BinaryData"] = l.adv_b64;
+    g_quest_data["BinarySize"] = std::to_string(l.adv_size);
+    g_quest_data["SearchKeyNum"] = "15";
+    for (int n = 0; n < 15; n++) g_quest_data["SearchKey" + std::to_string(n)] = kSearchKeys[n];
+    L("JoinLobby: the quest lobby answers with the room's data (owner %s, %d player(s))", g_quest_data["OwnerId"].c_str(), l.players);
+}
+
 uint64_t join(uint64_t lobby) {
     std::lock_guard lock(g_m);
     g_join_handle = g_next_handle++;
@@ -380,6 +405,11 @@ uint64_t join(uint64_t lobby) {
     if (lobby == kQuestLobby) {  // the quest of the room the PC is in: already in its session
         L("JoinLobby: the quest lobby, in the Switch session already");
         if (!g_quest_owner) g_quest_owner = host_id();
+        // 2026-11-26 15:29 log: joining the phone's quest, every GetLobbyData (OwnerId, IsEnableAuth, SlotTotalUse, ...)
+        // came back "" (g_quest_data is only what the game itself sets on a lobby it made), while the room join got real
+        // values and went on to read the host's Index, BeginAuthSession and set its own Index. The quest lobby stands for
+        // the same Switch session, so it answers with the room's data.
+        if (g_quest_data.empty() && g_quest_owner == host_id()) fill_quest_data_from_room();
         const uint64_t h = g_join_handle;
         lobby_entered(lobby, 1);
         g_join_handle = 0;
@@ -432,6 +462,22 @@ uint64_t create_quest_lobby() {
     memcpy(upd.data() + 8, &kQuestLobby, 8);
     upd[16] = 1;
     g_cbs.push_back({505, upd});
+    // The Switch host is in this session already, so in this quest lobby it is a member that has entered: LobbyChatUpdate_t
+    // (lobby, user changed, making change, state 1 = entered). Without it the game never counted the phone as a quest
+    // member (15:13-15:30 logs: no GetNumLobbyMembers / GetLobbyMemberByIndex / host Index read in the quest lobby, the phone's
+    // member info reached the Steam layer but receiveQuestMemberInfo never ran, the quest started alone).
+    // rise_no_quest_enter.txt next to the game turns this off.
+    if (g_in_room && GetFileAttributesA(game_file("rise_no_quest_enter.txt").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::vector<uint8_t> chat(28, 0);
+        const uint64_t phone = host_id();
+        memcpy(chat.data(), &kQuestLobby, 8);
+        memcpy(chat.data() + 8, &phone, 8);
+        memcpy(chat.data() + 16, &phone, 8);
+        const uint32_t entered = 1;  // k_EChatMemberStateChangeEntered
+        memcpy(chat.data() + 24, &entered, 4);
+        g_cbs.push_back({506, chat});
+        L("quest lobby: the Switch host announced as having entered (LobbyChatUpdate_t)");
+    }
     L("CreateLobby for a quest in a Switch room: lobby %llx, in the Switch session (no Steam lobby)",
       static_cast<unsigned long long>(kQuestLobby));
     return handle;
@@ -443,8 +489,14 @@ void set_lobby_data(uint64_t lobby, const char* key, const char* value) {
     g_quest_data[key] = value ? value : "";
 }
 int member_count(uint64_t) { L("GetNumLobbyMembers -> 2"); return 2; }
-uint64_t member_by_index(uint64_t, int i, uint64_t me) {
-    L("GetLobbyMemberByIndex(%d)", i);
+uint64_t member_by_index(uint64_t lobby, int i, uint64_t me) {
+    bool pc_owner = false;
+    {
+        std::lock_guard lock(g_m);
+        pc_owner = lobby == kQuestLobby && g_quest_owner && g_quest_owner != host_id();
+    }
+    L("GetLobbyMemberByIndex(%d)%s", i, pc_owner ? " in the PC's quest: the PC first" : "");
+    if (pc_owner) return i == 0 ? me : host_id();  // the owner is member 0 of a lobby it made
     return i == 0 ? host_id() : me;
 }
 uint64_t owner(uint64_t lobby) {
