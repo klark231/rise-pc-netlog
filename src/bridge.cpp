@@ -463,25 +463,19 @@ const char* member_data(uint64_t lobby, uint64_t member, const char* key) {
     const bool host = member == host_id();
     static std::set<std::string> logged;
     std::lock_guard lock(g_m);
-    // The PC's Index in its quest lobby. As the lobby's maker it sets 0, the Switch host's slot, and waits until it
-    // reads 0 back (answering its room slot from the start, 03:44, left it on "creating the quest session"). With 0
-    // the phone saw the quest's slot 0 taken by the host, i.e. itself, never the PC, and gave up loading into it
-    // (04:03). So the first read gives 0 and every one after it the PC's slot in the room, with a LobbyDataUpdate so
-    // the game reads it again.
-    if (!host && key && lobby == kQuestLobby && !strcmp(key, "Index") && g_quest_owner && g_room_index[0]) {
-        if (g_quest_index_reads++ == 0) {
-            auto it = g_own_member.find({lobby, key});
-            std::vector<uint8_t> upd(20, 0);
-            const uint64_t me = g_own_id ? g_own_id() : 0;
-            memcpy(upd.data(), &lobby, 8);
-            memcpy(upd.data() + 8, &me, 8);
-            upd[16] = 1;
-            g_cbs.push_back({505, upd});
-            L("quest lobby: the PC's Index read back as it set it, %s; from now on its room slot, %s",
-              it != g_own_member.end() ? it->second.c_str() : "(none)", g_room_index);
-            if (it != g_own_member.end()) return it->second.c_str();
+    // Quest lobby Index, 2026-11-26 (log of 15:13-15:15): the PC makes the quest, so it is slot 0 there, as it sets itself
+    // (making it 1 took Depart away: the game counts the PC as quest host 0). Until now the Switch host answered 0 here
+    // too, so on the PC both members were slot 0: the phone's member info (the 45 and 59-byte messages it sent at goQuest,
+    // received by the PC) never reached receiveQuestMemberInfo, `_questMemberInfo` stayed [nil obj nil nil] and the PC
+    // started the quest alone ("currentQuestPlayerCount 1"), notifying no guest, so the phone sat in Now Loading. In a
+    // quest the PC made, the Switch host is slot 1.
+    if (key && lobby == kQuestLobby && !strcmp(key, "Index") && g_quest_owner && g_quest_owner != host_id()) {
+        if (host) {
+            if (logged.insert("quest host Index 1").second) L("quest lobby: the Switch host is slot 1 in the PC's quest");
+            return "1";
         }
-        return g_room_index;
+        auto it = g_own_member.find({lobby, key});
+        return it != g_own_member.end() ? it->second.c_str() : "0";
     }
     if (!host && key) {
         auto it = g_own_member.find({lobby, key});

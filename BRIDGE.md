@@ -160,3 +160,13 @@ made **Depart impossible** on the PC: no `requestPrepareQuest`/`goQuest` in the 
 run (no slot fix) could depart. The game counts the PC as quest host 0, so the PC must keep quest index 0. Both
 experiments are removed; `rise_quest_slot.txt` does nothing any more (delete it if an old build is still installed).
 The phone side (it takes itself for the quest host and marks only its own slot) is the open problem.
+
+2026-11-26 15:13-15:15 (PC posts, phone joins, both depart; no slot experiments): the PC could depart again and started the
+quest alone. After goQuest its `_questMemberInfo` was [nil obj nil nil] (only itself), `currentQuestPlayerCount` 1,
+`_questMemberList._join` [true false false false]; it sent its start notice (tryNotifyStartQuestToGuest) to nobody and
+the phone, which had got the PC's member list and member info, waited in Now Loading for a start that never came. The
+phone's own member info (45 and 59-byte messages at goQuest) did reach the PC's Steam layer, but the game never called
+receiveQuestMemberInfo for it. Likely cause: in the quest lobby the DLL gave the Switch host Index 0, the same as the
+PC's own 0, so the game could not tell the sender from itself. Change: in a quest the PC made, the Switch host is
+Index 1 there (the PC stays 0). The old "read back 0 once, then the room slot" trick is gone.
+getMyQuestIndex/getQuestHostIndex return System.Nullable<System.Int32> (8 bytes), not an int.
