@@ -333,8 +333,28 @@ local function dump_obj(label, o)
         end
     end
 end
+local put_how = nil
 local function put(arr, i, v)
-    return pcall(function() arr[i] = v end) or pcall(arr.set_element, arr, i, v) or pcall(arr.call, arr, "set_Item", i, v)
+    local attempts = {
+        function() arr[i] = v end,
+        function() arr:set_element(i, v) end,
+        function() arr:call("SetValue(System.Object, System.Int32)", v, i) end,
+        function() arr:call("set_Item", i, v) end,
+    }
+    for k, f in ipairs(attempts) do
+        if pcall(f) then
+            if type(v) == "userdata" then return true end
+            local back = try(arr.get_element, arr, i)
+            if back == nil then back = try(arr.call, arr, "get_Item", i) end
+            if type(back) == "userdata" then back = try(back.call, back, "ToString") end
+            if tostring(back):lower() == tostring(v):lower() then
+                if put_how ~= k then put_how = k say("qmi: array write method " .. k .. " works") end
+                return true
+            end
+        end
+    end
+    say("qmi: could not write " .. tostring(v) .. " at " .. i)
+    return false
 end
 local function pick(h, words)
     local td = try(h.get_type_definition, h)
@@ -371,14 +391,12 @@ local function fill()
                 local h = try(ha.call, ha, "get_Item", i) or try(ha.get_element, ha, i)
                 local v
                 if fname == "_valid" then v = h ~= nil
-                elseif fname == "_questHost" then v = (i == 0)
-                elseif fname == "_quickMatch" then v = false
                 elseif h ~= nil then
-                    local words = ({ _weapon = {"weapon"}, _hunterRank = {"hunterrank", "_hr"}, _masterRank = {"masterrank", "_mr"},
-                        _name = {"name"}, _netId = {"netid"} })[fname]
-                    v = pick(h, words)
-                    if fname == "_name" and v ~= nil and type(v) ~= "userdata" then v = sdk.create_managed_string(tostring(v)) end
+                    local src = ({ _questHost = "_questHost", _quickMatch = "_quickMatch", _hunterRank = "_hunterRank",
+                        _masterRank = "_masterRank", _name = "_name", _netId = "_NetworkId" })[fname]
+                    if src then v = try(h.get_field, h, src) end
                 end
+                if fname == "_name" and type(v) == "string" then v = sdk.create_managed_string(v) end
                 if v == nil then
                     if et == "System.Boolean" then v = false elseif et == "System.String" then v = sdk.create_managed_string("") else v = 0 end
                 end
