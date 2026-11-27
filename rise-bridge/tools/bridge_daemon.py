@@ -20,6 +20,31 @@ class Daemon:
         here = os.path.dirname(os.path.abspath(__file__))
         self.hello_map = hellomap.find(os.getcwd(), os.path.join(here, ".."), here, os.path.dirname(os.path.abspath(sys.argv[0])))
         self.log("hello map: %s" % ("loaded" if self.hello_map else "none"))
+        # A dump of the game's messages in full, to compare what a PC and a Switch send (hunter and quest member info are
+        # not understood by the other side): rise_msgdump.txt next to rise_bridge_log.txt, overwritten at each start.
+        app_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(sys.argv[0]))
+        self._dump_seen, self._dump_n, self._dump_path = {}, 0, os.path.join(app_dir, "rise_msgdump.txt")
+        try:
+            open(self._dump_path, "w").close()
+        except OSError:
+            self._dump_path = None
+
+    def _dump(self, direction: str, data: bytes) -> None:
+        """direction: "pc>sw" (what the game sent) or "sw>pc" (what the Switch host sent), the message as it arrived, before
+        any rewriting. Every size's first 6 messages, then every message of 90+ bytes (the hunter / member info ones)
+        up to a cap, so the file stays a few MB."""
+        if not self._dump_path or not data or self._dump_n >= 3000:
+            return
+        k = (direction, len(data))
+        self._dump_seen[k] = self._dump_seen.get(k, 0) + 1
+        if self._dump_seen[k] > 6 and len(data) < 90:
+            return
+        self._dump_n += 1
+        try:
+            with open(self._dump_path, "a", encoding="utf-8") as f:
+                f.write("%s %s len %d #%d %s\n" % (time.strftime("%H:%M:%S"), direction, len(data), self._dump_seen[k], data.hex()))
+        except OSError:
+            self._dump_path = None
 
     def reply(self, text: str) -> None:
         if self.dll:
@@ -107,6 +132,7 @@ class Daemon:
                 self.sw_lobby.from_host(p)
             return
         self.log("Switch host -> game: %d bytes" % len(payload))
+        self._dump("sw>pc", payload)
         fixed = gamemsg.to_pc(payload)
         if fixed != payload:
             self.log("the host's platform message made the way a PC sends it, same identity %s"
@@ -143,6 +169,8 @@ class Daemon:
                 self._pc_lobby_for(chan).from_pc(p)
             return
         self.log("game -> Switch host: %d bytes" % (len(game) if game else 0))
+        if game:
+            self._dump("pc>sw", game)
 
         # Everything else goes to the host as it is, the platform message with the Switch's platform byte (and the
         # same identity: every member message the PC sends afterwards carries it).
