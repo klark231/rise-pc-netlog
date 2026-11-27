@@ -290,4 +290,74 @@ else
     say("fields probe not loaded: " .. tostring(fields_err))
 end
 
+-- 2026-11-27 experiment (PC only): joining a Switch quest, the PC never ran receiveQuestMemberInfo, so
+-- LobbyManager._questMemberInfo stayed [nil nil nil nil], no quest hunters were made and loading waited until the
+-- game gave up (exitHallOnNetworkError). After the game's own funcOnGoQuest this fills each empty slot that has a
+-- hall HunterInfo with a QuestMemberInfo made by copying same-named fields, and logs the QuestMemberInfo fields
+-- ("[xquest] qmi") so the next run shows what the type holds. rise_no_qmi.txt in the game folder turns it off.
+local qmi_code = [==[
+local say, try, on_pc = ...
+if not on_pc then return end
+local lm_type = sdk.find_type_definition("snow.LobbyManager")
+local qtd = sdk.find_type_definition("snow.LobbyManager.QuestMemberInfo")
+if not (lm_type and qtd) then say("qmi: types not found") return end
+local off = false
+pcall(function() local f = io.open("rise_no_qmi.txt", "r") if f then f:close() off = true end end)
+if off then say("qmi: off (rise_no_qmi.txt)") return end
+for _, f in ipairs(try(qtd.get_fields, qtd) or {}) do
+    local ft = try(f.get_type, f)
+    say("qmi field " .. tostring(try(f.get_name, f)) .. " : " .. tostring(ft and try(ft.get_full_name, ft)))
+end
+local todo, at, tries = false, 0, 0
+local function fill()
+    local lm = sdk.get_managed_singleton("snow.LobbyManager")
+    if not lm then return end
+    local qa = try(lm.get_field, lm, "_questMemberInfo")
+    local ha = try(lm.get_field, lm, "_hunterInfo")
+    if not (qa and ha) then say("qmi: arrays missing") return end
+    for i = 0, 3 do
+        local q = try(qa.call, qa, "get_Item", i) or try(qa.get_element, qa, i)
+        local h = try(ha.call, ha, "get_Item", i) or try(ha.get_element, ha, i)
+        if q == nil and h ~= nil then
+            local n = try(sdk.create_instance, "snow.LobbyManager.QuestMemberInfo")
+            if n == nil then say("qmi: create_instance failed") return end
+            try(n.add_ref, n)
+            local htd = try(h.get_type_definition, h)
+            local copied = 0
+            for _, f in ipairs(try(qtd.get_fields, qtd) or {}) do
+                local name = try(f.get_name, f)
+                if name and not try(f.is_static, f) then
+                    local v = try(h.get_field, h, name)
+                    if v ~= nil then if pcall(n.set_field, n, name, v) then copied = copied + 1 end end
+                end
+            end
+            local set = pcall(qa.call, qa, "set_Item", i, n) or pcall(qa.set_element, qa, i, n)
+            say("qmi: slot " .. i .. " made from the hall hunter info, " .. copied .. " fields copied, stored " .. tostring(set))
+        end
+    end
+    say("qmi: _questMemberInfo now " .. tostring(try(function() local out = {} for i = 0, 3 do local e = try(qa.call, qa, "get_Item", i) out[#out+1] = e and "obj" or "nil" end return table.concat(out, " ") end)))
+end
+local m = lm_type:get_method("funcOnGoQuest")
+if m then
+    pcall(sdk.hook, m, nil, function(rv) todo, at, tries = true, os.clock() + 1, 0 return rv end)
+end
+re.on_frame(function()
+    if todo and os.clock() >= at then
+        tries = tries + 1
+        at = os.clock() + 2
+        local ok, err = pcall(fill)
+        if not ok then say("qmi failed: " .. tostring(err)) end
+        if tries >= 3 then todo = false end
+    end
+end)
+say("qmi ready")
+]==]
+local qmi_fn, qmi_err = load(qmi_code, "xquest_qmi")
+if qmi_fn then
+    local ok, err = pcall(qmi_fn, say, try, on_pc)
+    if not ok then say("qmi probe failed: " .. tostring(err)) end
+else
+    say("qmi not loaded: " .. tostring(qmi_err))
+end
+
 say("ready")
