@@ -73,8 +73,20 @@ class Daemon:
         if not 1 <= index <= 3:
             self.log("station address %08x: no player slot in it, the PC goes in as player 3" % st.link.address)
             index = 3
-        self.pc_lobby = lobby.PcLobby(HOST_SID, lambda m: self.reply("RECV " + joinmsgs.steam_wrap(m).hex()), self.log,
-                                      index)
+        # Each lobby of the game has its own Steam channel (the hub's is 0xB1D60001, the quest lobby's 0xB1D60020): a lobby
+        # of its own here too, and its answers go back on its own channel ("RECVC <channel> <hex>"). One lobby for both
+        # (before) meant the quest lobby got the room's keep-alives and the room got the quest's answers (2026-11-26 logs:
+        # the PC repeated its quest join for 22 s, never taking the host's answer).
+        self.lobby_index = index
+        self.lobby_chan = None   # the channel of the room's lobby, the first one the game sends a lobby message on
+        self.pc_quest = {}       # channel -> PcLobby for the other lobbies
+
+        def to_game(m, chan=None):
+            c = self.lobby_chan if chan is None else chan
+            hexs = joinmsgs.steam_wrap(m).hex()
+            self.reply(("RECVC %d " % c + hexs) if c is not None else ("RECV " + hexs))
+        self.pc_lobby = lobby.PcLobby(HOST_SID, to_game, self.log, index)
+        self._to_game = to_game
         self.sw_lobby = lobby.SwitchLobby(lambda m: st.send_game(st._host()[0], m), self.log)
 
         def ticks(pc=self.pc_lobby):
@@ -82,6 +94,8 @@ class Daemon:
                 time.sleep(0.5)
                 try:
                     pc.tick()
+                    for q in list(self.pc_quest.values()):
+                        q.tick()
                 except Exception as e:
                     self.log("lobby keep-alive: %s" % e)
         threading.Thread(target=ticks, daemon=True).start()
@@ -100,7 +114,23 @@ class Daemon:
             payload = fixed
         self.reply("RECV " + joinmsgs.steam_wrap(payload).hex())
 
-    def to_switch(self, data: bytes) -> None:
+    def _pc_lobby_for(self, chan):
+        """The lobby that talks to the game on this Steam channel: the room's for the first channel a lobby message comes
+        on, one made for each other channel (a quest's) with the same slot, answering as a quest lobby."""
+        if chan is None:
+            return self.pc_lobby
+        if self.lobby_chan is None:
+            self.lobby_chan = chan
+        if chan == self.lobby_chan:
+            return self.pc_lobby
+        q = self.pc_quest.get(chan)
+        if q is None:
+            self.log("[lobby] a lobby on channel %d (%08x) besides the room's: answering it on its own" % (chan, chan & 0xFFFFFFFF))
+            q = lobby.PcLobby(HOST_SID, lambda m, c=chan: self._to_game(m, c), self.log, self.lobby_index, quest=True)
+            self.pc_quest[chan] = q
+        return q
+
+    def to_switch(self, data: bytes, chan=None) -> None:
         if data.startswith(b"SteamCon"):
             if data == CON_REQ:
                 self.reply("RECV " + CON_ANS.hex())
@@ -110,7 +140,7 @@ class Daemon:
         p = wire.decode(game) if game else None
         if p is not None and p[:2] == wire.LOBBY:
             if self.pc_lobby:
-                self.pc_lobby.from_pc(p)
+                self._pc_lobby_for(chan).from_pc(p)
             return
         self.log("game -> Switch host: %d bytes" % (len(game) if game else 0))
 
@@ -145,6 +175,9 @@ class Daemon:
             self.log("[dll] " + arg)           # the DLL's own log lines (rise_netlog.txt isn't always complete)
         elif cmd == "SEND":
             self.to_switch(bytes.fromhex(arg))
+        elif cmd == "SENDC":       # the same with the Steam channel it was sent on: "SENDC <channel> <hex>"
+            c, _, h = arg.partition(" ")
+            self.to_switch(bytes.fromhex(h), int(c))
         elif cmd == "LEAVE" and self.link:
             self.log("the game left the lobby")
             if self.station:
@@ -153,6 +186,7 @@ class Daemon:
             self.link.leave()
             self.link = self.station = None
             self.pc_lobby = self.sw_lobby = None
+            self.pc_quest, self.lobby_chan = {}, None
 
     def run(self) -> None:
         self.log("bridge daemon on 127.0.0.1:%d" % self.sock.getsockname()[1])

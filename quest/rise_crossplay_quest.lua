@@ -14,7 +14,18 @@
 -- is asked when a quest is posted or joined.
 
 local TAG = "[xquest] "
-local function say(text) log.info(TAG .. text) end
+-- Also written to reframework/data/rise_xquest_log.txt, one line at a time (opened and closed per line, so it is on disk
+-- even if the game is killed): re2_framework_log.txt is only complete once REFramework shuts down cleanly, and a run
+-- that ends in a crash or a task kill leaves the old file. (On the port there's no such folder: the open just fails.)
+local XLOG = "reframework/data/rise_xquest_log.txt"
+pcall(function() local f = io.open(XLOG, "w") if f then f:write("[xquest] log started\n") f:close() end end)
+local function say(text)
+    log.info(TAG .. text)
+    pcall(function()
+        local f = io.open(XLOG, "a")
+        if f then f:write(os.date("%H:%M:%S ") .. TAG .. text .. "\n") f:close() end
+    end)
+end
 
 local function try(f, ...)
     local ok, value = pcall(f, ...)

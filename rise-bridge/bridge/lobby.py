@@ -44,13 +44,13 @@ def fake_ticket(sid: int) -> bytes:
 class PcLobby:
     """The PC host's side of the lobby, toward the PC game."""
 
-    def __init__(self, host_sid: int, send, log=print, index: int = 3):
+    def __init__(self, host_sid: int, send, log=print, index: int = 3, quest: bool = False):
         self.host_sid, self.send, self.log = host_sid, send, log
         self.index = index  # the PC's player slot, the one the Switch host gave our station
         self.host_id = self.pc_id = None   # the 4-byte ids of the two games (from the platform messages)
         self.next_seq, self.unacked, self.last_rx = 1, [], 0
         self.answered = False
-        self.quest = False  # answering a quest lobby's join (see from_pc)
+        self.quest = quest  # answering a quest lobby's join: set from the start for a lobby of its own channel, or by from_pc
         self.lock = threading.Lock()
 
     def ids(self, host_id: bytes, pc_id: bytes) -> None:

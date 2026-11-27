@@ -97,6 +97,7 @@ struct Cb {
 };
 std::deque<Cb> g_cbs;
 std::deque<std::vector<uint8_t>> g_inbox;
+std::map<int, std::deque<std::vector<uint8_t>>> g_chan_inbox;  // lobby messages, by the channel they answer on (RECVC)
 Cb g_current;
 bool g_have_current = false;
 uint64_t g_next_handle = 0xB1D6000000000001ull;
@@ -212,6 +213,16 @@ void on_datagram(const std::string& s) {
         for (size_t i = 5; i + 1 < s.size(); i += 2) d.push_back(static_cast<uint8_t>(strtol(s.substr(i, 2).c_str(), nullptr, 16)));
         std::lock_guard lock(g_m);
         g_inbox.push_back(std::move(d));
+    } else if (s.compare(0, 6, "RECVC ") == 0) {
+        // "RECVC <channel> <hex>": a lobby's own answer, delivered on that lobby's channel whatever the game sent on last
+        const size_t sp = s.find(' ', 6);
+        if (sp != std::string::npos) {
+            const int chan = atoi(s.substr(6, sp - 6).c_str());
+            std::vector<uint8_t> d;
+            for (size_t i = sp + 1; i + 1 < s.size(); i += 2) d.push_back(static_cast<uint8_t>(strtol(s.substr(i, 2).c_str(), nullptr, 16)));
+            std::lock_guard lock(g_m);
+            g_chan_inbox[chan].push_back(std::move(d));
+        }
     } else if (s.compare(0, 4, "LEFT") == 0) {
         L("daemon: the Switch host left");
     }
@@ -293,7 +304,7 @@ void start() {
     g_daemon.sin_port = htons(39600);
     inet_pton(AF_INET, "127.0.0.1", &g_daemon.sin_addr);
     L("bridge mode: the daemon is expected on 127.0.0.1:39600");
-    L("build 7 (quest: room data for a joined Switch quest, member entered + member order for the PC's quest): manual-dispatch call results, CSteamID returned through a hidden pointer, member and leave logging, hello swap, quest lobby Index read once as set then its room slot, this log also sent to the helper");
+    L("build 8 (a lobby per channel; quest: room data for a joined Switch quest, member entered + member order for the PC's quest): manual-dispatch call results, CSteamID returned through a hidden pointer, member and leave logging, hello swap, quest lobby Index read once as set then its room slot, this log also sent to the helper");
     g_calibrate = GetFileAttributesA(game_file("rise_bridge_calibrate.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
     if (FILE* f = fopen(game_file("rise_hello.txt").c_str(), "r")) {
         char hex[64] = {};
@@ -561,7 +572,7 @@ void send_to_host(const void* data, uint32_t size, int channel) {
         g_channel = channel;
     }
     static const char* hex = "0123456789abcdef";
-    std::string s = "SEND ";
+    std::string s = "SENDC " + std::to_string(channel) + " ";
     const auto* b = static_cast<const uint8_t*>(data);
     for (uint32_t i = 0; i < size; i++) {
         s += hex[b[i] >> 4];
@@ -583,6 +594,25 @@ void send_to_host(const void* data, uint32_t size, int channel) {
 int receive(int channel, void** out, int max) {
     std::lock_guard lock(g_m);
     int n = 0;
+    auto lc = g_chan_inbox.find(channel);
+    if (lc != g_chan_inbox.end()) {
+        while (n < max && !lc->second.empty()) {
+            auto d = std::move(lc->second.front());
+            lc->second.pop_front();
+            auto* m = new NetMessage{};
+            m->data = new uint8_t[d.size() ? d.size() : 1];
+            memcpy(m->data, d.data(), d.size());
+            m->size = static_cast<int>(d.size());
+            m->peer.type = 16;
+            m->peer.size = 8;
+            m->peer.steam_id = host_id();
+            m->time_received = static_cast<int64_t>(GetTickCount64()) * 1000;
+            m->release = &release_message;
+            m->channel = channel;
+            out[n++] = m;
+        }
+        if (n) return n;
+    }
     if (channel != g_channel) return 0;
     while (n < max && !g_inbox.empty()) {
         auto d = std::move(g_inbox.front());
