@@ -309,32 +309,88 @@ for _, f in ipairs(try(qtd.get_fields, qtd) or {}) do
     say("qmi field " .. tostring(try(f.get_name, f)) .. " : " .. tostring(ft and try(ft.get_full_name, ft)))
 end
 local todo, at, tries = false, 0, 0
+local function vtext(v)
+    if v == nil then return "nil" end
+    if type(v) ~= "userdata" then return tostring(v) end
+    return tostring(try(v.call, v, "ToString") or "obj")
+end
+local function dump_obj(label, o)
+    if o == nil then say("qmi " .. label .. " = nil") return end
+    local td = try(o.get_type_definition, o)
+    for _, f in ipairs(td and try(td.get_fields, td) or {}) do
+        if not try(f.is_static, f) then
+            local v = try(f.get_data, f, o)
+            local extra = ""
+            if type(v) == "userdata" then
+                local n = try(v.call, v, "get_Length")
+                if n then
+                    local out = {}
+                    for i = 0, math.min(n, 4) - 1 do out[#out+1] = vtext(try(v.call, v, "get_Item", i) or try(v.get_element, v, i)) end
+                    extra = " len " .. n .. " [" .. table.concat(out, " ") .. "]"
+                end
+            end
+            say("qmi " .. label .. "." .. tostring(try(f.get_name, f)) .. " = " .. vtext(v) .. extra)
+        end
+    end
+end
+local function put(arr, i, v)
+    return pcall(function() arr[i] = v end) or pcall(arr.set_element, arr, i, v) or pcall(arr.call, arr, "set_Item", i, v)
+end
+local function pick(h, words)
+    local td = try(h.get_type_definition, h)
+    for _, f in ipairs(td and try(td.get_fields, td) or {}) do
+        local name = (try(f.get_name, f) or ""):lower()
+        for _, w in ipairs(words) do
+            if name:find(w, 1, true) and not try(f.is_static, f) then return try(f.get_data, f, h) end
+        end
+    end
+end
 local function fill()
     local lm = sdk.get_managed_singleton("snow.LobbyManager")
     if not lm then return end
     local qa = try(lm.get_field, lm, "_questMemberInfo")
     local ha = try(lm.get_field, lm, "_hunterInfo")
     if not (qa and ha) then say("qmi: arrays missing") return end
-    for i = 0, 3 do
-        local q = try(qa.call, qa, "get_Item", i) or try(qa.get_element, qa, i)
-        local h = try(ha.call, ha, "get_Item", i) or try(ha.get_element, ha, i)
-        if q == nil and h ~= nil then
-            local n = try(sdk.create_instance, "snow.LobbyManager.QuestMemberInfo")
-            if n == nil then say("qmi: create_instance failed") return end
-            try(n.add_ref, n)
-            local htd = try(h.get_type_definition, h)
-            local copied = 0
-            for _, f in ipairs(try(qtd.get_fields, qtd) or {}) do
-                local name = try(f.get_name, f)
-                if name and not try(f.is_static, f) then
-                    local v = try(h.get_field, h, name)
-                    if v ~= nil then if pcall(n.set_field, n, name, v) then copied = copied + 1 end end
+    if tries == 1 then
+        dump_obj("hunter0", try(ha.call, ha, "get_Item", 0))
+        dump_obj("hunter1", try(ha.call, ha, "get_Item", 1))
+        dump_obj("myhunter", try(lm.get_field, lm, "_myHunterInfo"))
+    end
+    -- one QuestMemberInfo (4 slots in each of its arrays) describing the hall hunters, put in every empty slot
+    local n = try(sdk.create_instance, "snow.LobbyManager.QuestMemberInfo")
+    if n == nil then say("qmi: create_instance failed") return end
+    try(n.add_ref, n)
+    local specs = { _valid = "System.Boolean", _questHost = "System.Boolean", _quickMatch = "System.Boolean",
+        _weapon = "System.Int32", _hunterRank = "System.Int32", _masterRank = "System.Int32",
+        _name = "System.String", _netId = "System.UInt32" }
+    for fname, et in pairs(specs) do
+        local arr = try(sdk.create_managed_array, et, 4)
+        if arr then
+            try(arr.add_ref, arr)
+            for i = 0, 3 do
+                local h = try(ha.call, ha, "get_Item", i) or try(ha.get_element, ha, i)
+                local v
+                if fname == "_valid" then v = h ~= nil
+                elseif fname == "_questHost" then v = (i == 0)
+                elseif fname == "_quickMatch" then v = false
+                elseif h ~= nil then
+                    local words = ({ _weapon = {"weapon"}, _hunterRank = {"hunterrank", "_hr"}, _masterRank = {"masterrank", "_mr"},
+                        _name = {"name"}, _netId = {"netid"} })[fname]
+                    v = pick(h, words)
+                    if fname == "_name" and v ~= nil and type(v) ~= "userdata" then v = sdk.create_managed_string(tostring(v)) end
                 end
+                if v == nil then
+                    if et == "System.Boolean" then v = false elseif et == "System.String" then v = sdk.create_managed_string("") else v = 0 end
+                end
+                put(arr, i, v)
             end
-            local set = pcall(qa.call, qa, "set_Item", i, n) or pcall(qa.set_element, qa, i, n)
-            say("qmi: slot " .. i .. " made from the hall hunter info, " .. copied .. " fields copied, stored " .. tostring(set))
+            pcall(n.set_field, n, fname, arr)
+        else
+            say("qmi: no array for " .. fname)
         end
     end
+    for i = 0, 3 do try(qa.call, qa, "set_Item", i, n) end
+    dump_obj("made", n)
     say("qmi: _questMemberInfo now " .. tostring(try(function() local out = {} for i = 0, 3 do local e = try(qa.call, qa, "get_Item", i) out[#out+1] = e and "obj" or "nil" end return table.concat(out, " ") end)))
 end
 local m = lm_type:get_method("funcOnGoQuest")
